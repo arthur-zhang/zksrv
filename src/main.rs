@@ -2,7 +2,7 @@ mod codec;
 mod errors;
 mod proto;
 
-use crate::codec::{Context, State, ZkCodec};
+use crate::codec::{Context, State, ClientAuthCodec, PacketCodec};
 use crate::errors::ZkError;
 use crate::proto::ZkRequest::Connect;
 use crate::proto::{ConnectRequest, ConnectResponse, GetDataRequest, ZkRequest, ZkResponse};
@@ -22,8 +22,8 @@ pub struct Zookeeper<T, C> {
     pub read_only: bool,
 }
 
-impl Zookeeper<TcpStream, ZkCodec> {
-    pub async fn connect(addr: &str) -> Result<Zookeeper<TcpStream, ZkCodec>, ZkError> {
+impl Zookeeper<TcpStream, PacketCodec> {
+    pub async fn connect(addr: &str) -> Result<Zookeeper<TcpStream, PacketCodec>, ZkError> {
         let stream = match TcpStream::connect(addr).await {
             Ok(stream) => stream,
             Err(err) => {
@@ -33,7 +33,8 @@ impl Zookeeper<TcpStream, ZkCodec> {
                 )));
             }
         };
-        let mut framed = Framed::new(stream, ZkCodec { context: Context{ state: State::Connect, xid: 0 }});
+        let codec = ClientAuthCodec::new();
+        let mut framed = Framed::new(stream, codec);
         let connect_packet = ConnectRequest {
             protocol_version: 0,
             last_zxid_seen: 0,
@@ -46,6 +47,12 @@ impl Zookeeper<TcpStream, ZkCodec> {
         if let Some(Ok(resp)) = framed.next().await {
             if let ZkResponse::Connect(resp) = resp {
                 println!("resp: {:?}", resp);
+
+                let parts = framed.into_parts();
+                let packet_codec = PacketCodec::new(parts.codec);
+
+                let framed = Framed::new(parts.io, packet_codec);
+
                 Ok(Zookeeper {
                     framed,
                     protocol_version: resp.protocol_version,
