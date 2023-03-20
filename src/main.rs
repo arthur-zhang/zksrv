@@ -2,6 +2,7 @@ mod codec;
 mod errors;
 mod proto;
 mod server;
+mod constants;
 
 use crate::codec::{Context, State, ClientConnectCodec, ClientPacketCodec};
 use crate::errors::ZkError;
@@ -45,7 +46,7 @@ impl Zookeeper<TcpStream, ClientPacketCodec> {
             passwd: vec![],
             read_only: false,
         };
-        framed.send(ZkRequest::Connect(connect_packet)).await?;
+        framed.send(connect_packet).await?;
         if let Some(Ok(resp)) = framed.next().await {
             println!("resp: {:?}", resp);
 

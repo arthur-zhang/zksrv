@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio_util::codec::{Decoder, Encoder, Framed};
-use crate::codec::{ClientConnectCodec, ClientPacketCodec, State};
+use crate::codec::{ClientConnectCodec, ClientPacketCodec, ServerConnectCodec, State};
 use crate::errors::ZkError;
 use crate::proto::{ConnectRequest, ConnectResponse, ZkRequest, ZkResponse};
 
@@ -13,7 +13,7 @@ impl ZkServer {
         ZkServer {}
     }
     pub async fn start(&self) {
-        let listener = TcpListener::bind("127.0.0.1:2182").await.unwrap();
+        let listener = TcpListener::bind("0.0.0.0:2182").await.unwrap();
         loop {
             let (socket, peer_addr) = listener.accept().await.unwrap();
             println!("peer_addr: {:?}", peer_addr);
@@ -54,35 +54,6 @@ impl ZkServer {
             }
         }
         // }
-    }
-}
-
-struct ServerConnectCodec {}
-
-impl tokio_util::codec::Decoder for ServerConnectCodec {
-    type Item = ZkRequest;
-    type Error = ZkError;
-
-    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        println!("bytes len: {}", src.len());
-        if src.len() < 4 {
-            return Ok(None);
-        }
-
-        // self.next_state = State::ConnectDone;
-        Ok(Some(ZkRequest::Connect(ConnectRequest::deserialize(src))))
-    }
-}
-
-impl tokio_util::codec::Encoder<ConnectResponse> for ServerConnectCodec {
-    type Error = std::io::Error;
-
-    fn encode(&mut self, item: ConnectResponse, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        let mut tmp = Vec::new();
-        item.serialize_into(&mut tmp)?;
-        dst.put_i32(tmp.len() as i32);
-        dst.extend_from_slice(&tmp);
-        Ok(())
     }
 }
 

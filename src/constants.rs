@@ -1,0 +1,11 @@
+pub const  BOOL_LENGTH: i32 = 1;
+pub const  INT_LENGTH: i32 = 4;
+pub const  LONG_LENGTH: i32 = 8;
+pub const  XID_LENGTH: i32 = 4;
+pub const  OPCODE_LENGTH: i32 = 4;
+pub const  ZXID_LENGTH: i32 = 8;
+pub const  TIMEOUT_LENGTH: i32 = 4;
+pub const  SESSION_LENGTH: i32 = 8;
+pub const  MULTI_HEADER_LENGTH: i32 = 9;
+pub const  PROTOCOL_VERSION_LENGTH: i32 = 4;
+pub const  SERVER_HEADER_LENGTH: i32 = 16;

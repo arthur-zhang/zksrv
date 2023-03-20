@@ -3,6 +3,7 @@ use std::io::Read;
 use std::io::Write;
 use byteorder::BigEndian;
 use bytes::{Buf, BytesMut};
+use futures::future::ok;
 
 use crate::errors::ZkError;
 
@@ -16,7 +17,20 @@ pub struct ConnectRequest {
 }
 
 impl ConnectRequest {
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<(), io::Error> {
+        use byteorder::{BigEndian, WriteBytesExt};
+        buffer.write_i32::<BigEndian>(self.protocol_version)?;
+        buffer.write_i64::<BigEndian>(self.last_zxid_seen)?;
+        buffer.write_i32::<BigEndian>(self.timeout)?;
+        buffer.write_i64::<BigEndian>(self.session_id)?;
+        buffer.write_i32::<BigEndian>(self.passwd.len() as i32)?;
+        buffer.write_all(&self.passwd)?;
+        buffer.write_u8(self.read_only as u8)?;
+        Ok(())
+    }
+
     pub fn deserialize(mut bytes: &mut BytesMut) -> Self {
+
         let len = bytes.get_i32();
         let protocol_version = bytes.get_i32();
         let last_zxid_seen = bytes.get_i64();
