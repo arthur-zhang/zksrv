@@ -17,19 +17,19 @@ pub struct Context {
     pub xid: i32,
 }
 
-pub struct PacketCodec {
+pub struct ClientPacketCodec {
     pub xid: i32,
 }
 
-impl PacketCodec {
-    pub fn new(auth_codec: ClientAuthCodec) -> Self {
+impl ClientPacketCodec {
+    pub fn new(auth_codec: ClientConnectCodec) -> Self {
         Self {
             xid: auth_codec.xid,
         }
     }
 }
 
-impl Encoder<ZkRequest> for PacketCodec {
+impl Encoder<ZkRequest> for ClientPacketCodec {
     type Error = ZkError;
 
     fn encode(&mut self, item: ZkRequest, dst: &mut BytesMut) -> Result<(), Self::Error> {
@@ -48,7 +48,7 @@ impl Encoder<ZkRequest> for PacketCodec {
     }
 }
 
-impl Decoder for PacketCodec {
+impl Decoder for ClientPacketCodec {
     type Item = ZkResponse;
     type Error = ZkError;
 
@@ -93,13 +93,13 @@ impl Decoder for PacketCodec {
     }
 }
 
-pub struct ClientAuthCodec {
+pub struct ClientConnectCodec {
     pub next_state: State,
     pub xid: i32,
 }
 
 
-impl ClientAuthCodec {
+impl ClientConnectCodec {
     pub fn new() -> Self {
         Self {
             next_state: State::ConnectStart,
@@ -108,8 +108,8 @@ impl ClientAuthCodec {
     }
 }
 
-impl tokio_util::codec::Decoder for ClientAuthCodec {
-    type Item = ZkResponse;
+impl tokio_util::codec::Decoder for ClientConnectCodec {
+    type Item = ConnectResponse;
     type Error = ZkError;
 
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -138,13 +138,13 @@ impl tokio_util::codec::Decoder for ClientAuthCodec {
                 src.advance(passwd_len);
                 let read_only = src.get_u8();
                 self.next_state = State::ConnectDone;
-                Ok(Some(ZkResponse::Connect(ConnectResponse {
+                Ok(Some(ConnectResponse {
                     protocol_version,
                     timeout,
                     session_id,
                     passwd,
                     read_only: read_only == 1,
-                })))
+                }))
             }
             State::ConnectDone => {
                 return Ok(None);
@@ -156,7 +156,7 @@ impl tokio_util::codec::Decoder for ClientAuthCodec {
     }
 }
 
-impl tokio_util::codec::Encoder<ZkRequest> for ClientAuthCodec {
+impl tokio_util::codec::Encoder<ZkRequest> for ClientConnectCodec {
     type Error = std::io::Error;
 
     fn encode(&mut self, item: ZkRequest, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {

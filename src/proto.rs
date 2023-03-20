@@ -1,6 +1,8 @@
 use std::io;
 use std::io::Read;
 use std::io::Write;
+use byteorder::BigEndian;
+use bytes::{Buf, BytesMut};
 
 use crate::errors::ZkError;
 
@@ -11,6 +13,27 @@ pub struct ConnectRequest {
     pub session_id: i64,
     pub passwd: Vec<u8>,
     pub read_only: bool,
+}
+
+impl ConnectRequest {
+    pub fn deserialize(mut bytes: &mut BytesMut) -> Self {
+        let len = bytes.get_i32();
+        let protocol_version = bytes.get_i32();
+        let last_zxid_seen = bytes.get_i64();
+        let timeout = bytes.get_i32();
+        let session_id = bytes.get_i64();
+        let passwd_len = bytes.get_i32();
+        let mut passwd = vec![0; passwd_len as usize];
+        let read_only = bytes.get_u8();
+        ConnectRequest {
+            protocol_version,
+            last_zxid_seen,
+            timeout,
+            session_id,
+            passwd,
+            read_only: read_only != 0,
+        }
+    }
 }
 
 impl ZkRequest {
@@ -61,6 +84,19 @@ pub struct ConnectResponse {
     pub session_id: i64,
     pub passwd: Vec<u8>,
     pub read_only: bool,
+}
+
+impl ConnectResponse {
+    pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<(), io::Error> {
+        use byteorder::WriteBytesExt;
+        buffer.write_i32::<BigEndian>(self.protocol_version)?;
+        buffer.write_i32::<BigEndian>(self.timeout)?;
+        buffer.write_i64::<BigEndian>(self.session_id)?;
+        buffer.write_i32::<BigEndian>(self.passwd.len() as i32)?;
+        buffer.write_all(&self.passwd)?;
+        buffer.write_u8(self.read_only as u8)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]

@@ -1,8 +1,9 @@
 mod codec;
 mod errors;
 mod proto;
+mod server;
 
-use crate::codec::{Context, State, ClientAuthCodec, PacketCodec};
+use crate::codec::{Context, State, ClientConnectCodec, ClientPacketCodec};
 use crate::errors::ZkError;
 use crate::proto::ZkRequest::Connect;
 use crate::proto::{ConnectRequest, ConnectResponse, GetDataRequest, ZkRequest, ZkResponse};
@@ -12,6 +13,7 @@ use std::marker::PhantomData;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio_util::codec::{Decoder, Encoder, Framed};
+use crate::server::ZkServer;
 
 pub struct Zookeeper<T, C> {
     framed: Framed<T, C>,
@@ -22,8 +24,8 @@ pub struct Zookeeper<T, C> {
     pub read_only: bool,
 }
 
-impl Zookeeper<TcpStream, PacketCodec> {
-    pub async fn connect(addr: &str) -> Result<Zookeeper<TcpStream, PacketCodec>, ZkError> {
+impl Zookeeper<TcpStream, ClientPacketCodec> {
+    pub async fn connect(addr: &str) -> Result<Zookeeper<TcpStream, ClientPacketCodec>, ZkError> {
         let stream = match TcpStream::connect(addr).await {
             Ok(stream) => stream,
             Err(err) => {
@@ -33,7 +35,7 @@ impl Zookeeper<TcpStream, PacketCodec> {
                 )));
             }
         };
-        let codec = ClientAuthCodec::new();
+        let codec = ClientConnectCodec::new();
         let mut framed = Framed::new(stream, codec);
         let connect_packet = ConnectRequest {
             protocol_version: 0,
@@ -45,25 +47,21 @@ impl Zookeeper<TcpStream, PacketCodec> {
         };
         framed.send(ZkRequest::Connect(connect_packet)).await?;
         if let Some(Ok(resp)) = framed.next().await {
-            if let ZkResponse::Connect(resp) = resp {
-                println!("resp: {:?}", resp);
+            println!("resp: {:?}", resp);
 
-                let parts = framed.into_parts();
-                let packet_codec = PacketCodec::new(parts.codec);
+            let parts = framed.into_parts();
+            let packet_codec = ClientPacketCodec::new(parts.codec);
 
-                let framed = Framed::new(parts.io, packet_codec);
+            let framed = Framed::new(parts.io, packet_codec);
 
-                Ok(Zookeeper {
-                    framed,
-                    protocol_version: resp.protocol_version,
-                    timeout: resp.timeout,
-                    session_id: resp.session_id,
-                    passwd: resp.passwd,
-                    read_only: resp.read_only,
-                })
-            } else {
-                unreachable!()
-            }
+            Ok(Zookeeper {
+                framed,
+                protocol_version: resp.protocol_version,
+                timeout: resp.timeout,
+                session_id: resp.session_id,
+                passwd: resp.passwd,
+                read_only: resp.read_only,
+            })
         } else {
             Err(ZkError::SocketError("cannot connect to server".to_string()))
         }
@@ -91,33 +89,10 @@ impl Zookeeper<TcpStream, PacketCodec> {
 #[tokio::main]
 async fn main() -> Result<(), ZkError> {
     println!("Hello, world!");
-    let mut zk = Zookeeper::connect("127.0.0.1:2181").await?;
-    zk.get("/hello").await?;
-    // zk.get("/hello");
-    // let stream = TcpStream::connect("127.0.0.1:2181").await?;
-    // let mut framed = Framed::new(stream, ZkCodec {});
-    // framed.send(ConnectRequest {
-    //     protocol_version: 0,
-    //     last_zxid_seen: 0,
-    //     timeout: 10 * 1000,
-    //     session_id: 0,
-    //     passwd: vec![],
-    //     read_only: false,
-    // }).await?;
-    // loop {
-    //     match framed.next().await {
-    //         None => {
-    //             println!("eof");
-    //             break;
-    //         }
-    //         Some(Ok(res)) => {
-    //             println!("res: {:?}", res);
-    //         }
-    //         Some(Err(err)) => {
-    //             println!("err: {:?}", err);
-    //             break;
-    //         }
-    //     }
-    // }
+    // let mut zk = Zookeeper::connect("127.0.0.1:2181").await?;
+    // zk.get("/hello").await?;
+
+    let zk_server = ZkServer::new();
+    zk_server.start().await;
     Ok(())
 }
