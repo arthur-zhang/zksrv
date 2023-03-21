@@ -2,6 +2,7 @@
 pub enum ZkError {
     SocketError(String),
     InvalidPacketLength(i32),
+    InvalidString,
 }
 
 impl From<std::io::Error> for ZkError {

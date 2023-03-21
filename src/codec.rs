@@ -1,9 +1,10 @@
 use crate::errors::ZkError;
-use crate::proto::ZkRequest::Connect;
-use crate::proto::{ConnectRequest, ConnectResponse, GetDataResponse, ZkRequest, ZkResponse};
-use bytes::{Buf, BufMut};
+use crate::proto::{ConnectRequest, ConnectResponse, GetDataResponse, ReplyHeader, RequestPacket, ZkRequest, ZkResponse};
+use bytes::{Buf, BufMut, BytesMut};
+use num_traits::ToPrimitive;
 use tokio::io::AsyncWriteExt;
 use crate::constants::*;
+use crate::record::Record;
 
 #[derive(Eq, PartialEq)]
 pub enum State {
@@ -36,21 +37,13 @@ pub fn ensure_min_length(len: i32, min: i32) -> Result<(), ZkError> {
     Ok(())
 }
 
-impl tokio_util::codec::Encoder<ZkRequest> for ClientPacketCodec {
+impl tokio_util::codec::Encoder<RequestPacket> for ClientPacketCodec {
     type Error = ZkError;
 
-    fn encode(&mut self, item: ZkRequest, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        let mut vec = Vec::new();
-        {
-            let mut tmp = Vec::new();
-            item.serialize_into(&mut tmp)?;
-            vec.put_i32(self.xid);
-            vec.put_i32(4);
-            vec.extend_from_slice(&tmp);
-        }
-
-        dst.put_i32(vec.len() as i32);
-        dst.extend_from_slice(&vec);
+    fn encode(&mut self, item: RequestPacket, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        println!("size: {}", item.size());
+        dst.put_i32(item.size() as i32);
+        item.serialize_into(dst)?;
         Ok(())
     }
 }
@@ -65,14 +58,40 @@ impl tokio_util::codec::Decoder for ClientPacketCodec {
         }
         let packet_len = src.get_i32();
         println!("packet len: {}", packet_len);
+        if packet_len == 0 {
+            return Ok(None);
+        }
 
         let xid = src.get_i32();
         println!("xid: {}", xid);
         let zxid = src.get_i64();
         let err = src.get_i32();
+        match xid {
+            -2 => {
+                return Ok(Some(ZkResponse::Ping({
+                    ReplyHeader {
+                        xid,
+                        zxid,
+                        err,
+                    }
+                })));
+            }
+            _ => {}
+        }
+        if err != 0 {
+            return Ok(Some(ZkResponse::Ping({
+                ReplyHeader {
+                    xid,
+                    zxid,
+                    err,
+                }
+            })));
+        }
+
         println!("err: {}", err);
         let len = src.get_i32();
         println!("len: {}", len);
+
         let mut buf: Vec<u8>;
         if len > 0 {
             buf = vec![0; len as usize];
@@ -81,9 +100,11 @@ impl tokio_util::codec::Decoder for ClientPacketCodec {
             buf = vec![];
         }
         Ok(Some(ZkResponse::GetData(GetDataResponse {
-            xid,
-            zxid,
-            err,
+            reply_header: ReplyHeader {
+                xid,
+                zxid,
+                err,
+            },
             data: buf,
             czxid: src.get_i64(),
             mzxid: src.get_i64(),
@@ -116,7 +137,7 @@ impl ClientConnectCodec {
 }
 
 impl tokio_util::codec::Decoder for ClientConnectCodec {
-    type Item = ConnectResponse;
+    type Item = ZkResponse;
     type Error = ZkError;
 
     fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -141,27 +162,22 @@ impl tokio_util::codec::Decoder for ClientConnectCodec {
         src.copy_to_slice(&mut passwd);
         // src.advance(passwd_len);
         let read_only = src.get_u8();
-        Ok(Some(ConnectResponse {
+        Ok(Some(ZkResponse::Connect(ConnectResponse {
             protocol_version,
             timeout,
             session_id,
             passwd,
             read_only: read_only == 1,
-        }))
+        })))
     }
 }
 
-impl tokio_util::codec::Encoder<ConnectRequest> for ClientConnectCodec {
+impl tokio_util::codec::Encoder<ZkRequest> for ClientConnectCodec {
     type Error = std::io::Error;
 
-    fn encode(&mut self, item: ConnectRequest, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        let mut vec = Vec::new();
-        let mut tmp = Vec::new();
-        item.serialize_into(&mut tmp)?;
-
-        vec.extend_from_slice(&tmp);
-        dst.put_i32(vec.len() as i32);
-        dst.extend_from_slice(&vec);
+    fn encode(&mut self, item: ZkRequest, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        dst.put_i32(item.size() as i32);
+        item.serialize_into(dst); // todo
         Ok(())
     }
 }
@@ -177,7 +193,7 @@ pub fn maybe_read_bool(bytes: &mut bytes::BytesMut) -> bool {
 pub struct ServerConnectCodec {}
 
 impl tokio_util::codec::Decoder for ServerConnectCodec {
-    type Item = ConnectRequest;
+    type Item = ZkRequest;
     type Error = ZkError;
 
     fn decode(&mut self, bytes: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -201,18 +217,16 @@ impl tokio_util::codec::Decoder for ServerConnectCodec {
                 read_only,
             }
         };
-        Ok(Some(connect_req))
+        Ok(Some(ZkRequest::ConnectInit(connect_req)))
     }
 }
 
-impl tokio_util::codec::Encoder<ConnectResponse> for ServerConnectCodec {
+impl tokio_util::codec::Encoder<ZkResponse> for ServerConnectCodec {
     type Error = std::io::Error;
 
-    fn encode(&mut self, item: ConnectResponse, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        let mut tmp = Vec::new();
-        item.serialize_into(&mut tmp)?;
-        dst.put_i32(tmp.len() as i32);
-        dst.extend_from_slice(&tmp);
+    fn encode(&mut self, item: ZkResponse, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        dst.put_i32(item.size() as i32);
+        item.serialize_into(dst);//todo
         Ok(())
     }
 }

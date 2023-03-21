@@ -1,12 +1,13 @@
 use std::io;
-use std::io::Read;
+use std::io::{Error, Read};
 use std::io::Write;
-use byteorder::BigEndian;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use futures::future::ok;
 
 use crate::errors::ZkError;
+use crate::record::Record;
 
+#[derive(Debug)]
 pub struct ConnectRequest {
     pub protocol_version: i32,
     pub last_zxid_seen: i64,
@@ -17,20 +18,7 @@ pub struct ConnectRequest {
 }
 
 impl ConnectRequest {
-    pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<(), io::Error> {
-        use byteorder::{BigEndian, WriteBytesExt};
-        buffer.write_i32::<BigEndian>(self.protocol_version)?;
-        buffer.write_i64::<BigEndian>(self.last_zxid_seen)?;
-        buffer.write_i32::<BigEndian>(self.timeout)?;
-        buffer.write_i64::<BigEndian>(self.session_id)?;
-        buffer.write_i32::<BigEndian>(self.passwd.len() as i32)?;
-        buffer.write_all(&self.passwd)?;
-        buffer.write_u8(self.read_only as u8)?;
-        Ok(())
-    }
-
     pub fn deserialize(mut bytes: &mut BytesMut) -> Self {
-
         let len = bytes.get_i32();
         let protocol_version = bytes.get_i32();
         let last_zxid_seen = bytes.get_i64();
@@ -50,45 +38,184 @@ impl ConnectRequest {
     }
 }
 
-impl ZkRequest {
-    pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<(), io::Error> {
+// impl Record for ConnectRequest {
+//     fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+//         buffer.put_i32(self.protocol_version);
+//         buffer.put_i64(self.last_zxid_seen);
+//         buffer.put_i32(self.timeout);
+//         buffer.put_i64(self.session_id);
+//         buffer.put_i32(self.passwd.len() as i32);
+//         buffer.extend_from_slice(&self.passwd);
+//         buffer.put_u8(self.read_only as u8);
+//         Ok(())
+//     }
+//
+//     fn size(&self) -> usize {
+//         4 + 8 + 4 + 8 + 4 + self.passwd.len() + 1
+//     }
+// }
+
+impl Record for ZkRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
         match self {
-            ZkRequest::Connect(req) => {
-                use byteorder::{BigEndian, WriteBytesExt};
-                buffer.write_i32::<BigEndian>(req.protocol_version)?;
-                buffer.write_i64::<BigEndian>(req.last_zxid_seen)?;
-                buffer.write_i32::<BigEndian>(req.timeout)?;
-                buffer.write_i64::<BigEndian>(req.session_id)?;
-                buffer.write_i32::<BigEndian>(req.passwd.len() as i32)?;
-                buffer.write_all(&req.passwd)?;
-                buffer.write_u8(req.read_only as u8)?;
-            }
             ZkRequest::GetData(req) => {
-                use byteorder::{BigEndian, WriteBytesExt};
-                buffer.write_i32::<BigEndian>(req.path.len() as i32)?;
-                buffer.write_all(req.path.as_bytes())?;
-                buffer.write_u8(req.watch as u8)?;
+                buffer.put_i32(req.path.len() as i32);
+                buffer.extend_from_slice(req.path.as_bytes());
+                buffer.put_u8(req.watch as u8);
+            }
+            ZkRequest::Ping => {}
+            ZkRequest::ConnectInit(r) => {
+                buffer.put_i32(r.protocol_version);
+                buffer.put_i64(r.last_zxid_seen);
+                buffer.put_i32(r.timeout);
+                buffer.put_i64(r.session_id);
+                buffer.put_i32(r.passwd.len() as i32);
+                buffer.extend_from_slice(&r.passwd);
+                buffer.put_u8(r.read_only as u8);
             }
         }
         Ok(())
     }
+
+    fn size(&self) -> usize {
+        match self {
+            ZkRequest::GetData(req) => {
+                4 + req.path.len() + 1
+            }
+            ZkRequest::Ping => 0,
+            ZkRequest::ConnectInit(r) => {
+                4 + 8 + 4 + 8 + 4 + r.passwd.len() + 1
+            }
+        }
+    }
 }
 
+
+#[derive(Debug)]
 pub struct GetDataRequest {
     pub path: String,
     pub watch: bool,
 }
 
 
+#[derive(Debug)]
 pub enum ZkRequest {
-    Connect(ConnectRequest),
+    ConnectInit(ConnectRequest),
     GetData(GetDataRequest),
+    Ping,
 }
+
+#[derive(Debug)]
+pub struct RequestPacket {
+    pub request_header: RequestHeader,
+    pub request: ZkRequest,
+}
+
+impl Record for RequestPacket {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        self.request_header.serialize_into(buffer)?;
+        self.request.serialize_into(buffer)?;
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        self.request_header.size() + self.request.size()
+    }
+}
+
+#[derive(Debug)]
+pub struct RequestHeader {
+    pub xid: i32,
+    pub opcode: i32,
+}
+
+impl Record for RequestHeader {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.xid);
+        buffer.put_i32(self.opcode);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        8
+    }
+}
+
 
 #[derive(Debug)]
 pub enum ZkResponse {
     Connect(ConnectResponse),
     GetData(GetDataResponse),
+    Ping(ReplyHeader),
+}
+
+impl Record for ZkResponse {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        match self {
+            ZkResponse::Connect(resp) => {
+                buffer.put_i32(resp.protocol_version);
+                buffer.put_i32(resp.timeout);
+                buffer.put_i64(resp.session_id);
+                buffer.put_i32(resp.passwd.len() as i32);
+                buffer.extend_from_slice(&resp.passwd);
+                buffer.put_i8(resp.read_only as i8);
+            }
+            ZkResponse::GetData(r) => {
+                r.reply_header.serialize_into(buffer)?;
+                buffer.put_i32(r.data.len() as i32);
+                buffer.extend_from_slice(&r.data);
+                buffer.put_i64(r.czxid);
+                buffer.put_i64(r.mzxid);
+                buffer.put_i64(r.ctime);
+                buffer.put_i64(r.mtime);
+                buffer.put_i32(r.version);
+                buffer.put_i32(r.cversion);
+                buffer.put_i32(r.aversion);
+                buffer.put_i64(r.ephemeral_owner);
+                buffer.put_i32(r.data_length);
+                buffer.put_i32(r.num_children);
+                buffer.put_i64(r.pzxid);
+            }
+            ZkResponse::Ping(resp) => {
+                resp.serialize_into(buffer)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        match self {
+            ZkResponse::Connect(r) => {
+                4 + 4 + 8 + 4 + r.passwd.len() + 1
+            }
+            ZkResponse::GetData(r) => {
+                r.reply_header.size() + 4 + r.data.len() + 6 * 8 + 4 * 5
+            }
+            ZkResponse::Ping(r) => {
+                r.size()
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ReplyHeader {
+    pub xid: i32,
+    pub zxid: i64,
+    pub err: i32,
+}
+
+impl Record for ReplyHeader {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.xid);
+        buffer.put_i64(self.zxid);
+        buffer.put_i32(self.err);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        16
+    }
 }
 
 #[derive(Debug)]
@@ -100,24 +227,9 @@ pub struct ConnectResponse {
     pub read_only: bool,
 }
 
-impl ConnectResponse {
-    pub fn serialize_into(&self, buffer: &mut Vec<u8>) -> Result<(), io::Error> {
-        use byteorder::WriteBytesExt;
-        buffer.write_i32::<BigEndian>(self.protocol_version)?;
-        buffer.write_i32::<BigEndian>(self.timeout)?;
-        buffer.write_i64::<BigEndian>(self.session_id)?;
-        buffer.write_i32::<BigEndian>(self.passwd.len() as i32)?;
-        buffer.write_all(&self.passwd)?;
-        buffer.write_u8(self.read_only as u8)?;
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
 pub struct GetDataResponse {
-    pub xid: i32,
-    pub zxid: i64,
-    pub err: i32,
+    pub reply_header: ReplyHeader,
     pub data: Vec<u8>,
 
     pub czxid: i64,
@@ -142,4 +254,25 @@ pub struct GetDataResponse {
     /// The transaction ID that last modified the children of the znode.
     pub pzxid: i64,
 
+}
+
+impl GetDataResponse {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        self.reply_header.serialize_into(buffer)?;
+        buffer.put_i32(self.data.len() as i32);
+        buffer.extend_from_slice(&self.data);
+
+        buffer.put_i64(self.czxid);
+        buffer.put_i64(self.mzxid);
+        buffer.put_i64(self.ctime);
+        buffer.put_i64(self.mtime);
+        buffer.put_i32(self.version);
+        buffer.put_i32(self.cversion);
+        buffer.put_i32(self.aversion);
+        buffer.put_i64(self.ephemeral_owner);
+        buffer.put_i32(self.data_length);
+        buffer.put_i32(self.num_children);
+        buffer.put_i64(self.pzxid);
+        Ok(())
+    }
 }
