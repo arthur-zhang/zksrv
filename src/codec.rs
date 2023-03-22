@@ -182,7 +182,6 @@ impl Record for RequestHeader {
     }
 }
 
-
 #[derive(Debug)]
 pub enum ZkResponse {
     Connect(ConnectResponse),
