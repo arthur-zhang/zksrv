@@ -5,7 +5,7 @@ mod server;
 mod constants;
 mod record;
 
-use crate::codec::{Context, State, ClientConnectCodec, ClientPacketCodec};
+use crate::codec::{Context, State,  ClientPacketCodec};
 use crate::errors::ZkError;
 use crate::proto::{ConnectRequest, ConnectResponse, GetDataRequest, ZkRequest, ZkResponse};
 use failure::ResultExt;

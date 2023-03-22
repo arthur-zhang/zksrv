@@ -1,8 +1,4 @@
-use std::io;
-use std::io::{Error, Read};
-use std::io::Write;
 use bytes::{Buf, BufMut, BytesMut};
-use futures::future::ok;
 
 use crate::errors::ZkError;
 use crate::record::Record;
@@ -37,23 +33,6 @@ impl ConnectRequest {
         }
     }
 }
-
-// impl Record for ConnectRequest {
-//     fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-//         buffer.put_i32(self.protocol_version);
-//         buffer.put_i64(self.last_zxid_seen);
-//         buffer.put_i32(self.timeout);
-//         buffer.put_i64(self.session_id);
-//         buffer.put_i32(self.passwd.len() as i32);
-//         buffer.extend_from_slice(&self.passwd);
-//         buffer.put_u8(self.read_only as u8);
-//         Ok(())
-//     }
-//
-//     fn size(&self) -> usize {
-//         4 + 8 + 4 + 8 + 4 + self.passwd.len() + 1
-//     }
-// }
 
 impl Record for ZkRequest {
     fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
@@ -107,19 +86,21 @@ pub enum ZkRequest {
 
 #[derive(Debug)]
 pub struct RequestPacket {
-    pub request_header: RequestHeader,
+    pub request_header: Option<RequestHeader>,
     pub request: ZkRequest,
 }
 
 impl Record for RequestPacket {
     fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        self.request_header.serialize_into(buffer)?;
+        if let Some(header) = &self.request_header {
+            header.serialize_into(buffer)?;
+        }
         self.request.serialize_into(buffer)?;
         Ok(())
     }
 
     fn size(&self) -> usize {
-        self.request_header.size() + self.request.size()
+        self.request_header.as_ref().map_or(0, |h| h.size()) + self.request.size()
     }
 }
 
