@@ -565,11 +565,10 @@ fn get_str(bytes: &mut bytes::BytesMut) -> Result<String, ZkError> {
     Ok(str)
 }
 
-pub fn maybe_read_bool(bytes: &mut bytes::BytesMut) -> bool {
+fn maybe_read_bool(bytes: &mut bytes::BytesMut) -> bool {
     return if bytes.remaining() >= 1 {
         bytes.get_u8() == 1
     } else {
         false
     };
 }
-
