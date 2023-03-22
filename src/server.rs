@@ -5,13 +5,51 @@ use futures::{SinkExt, StreamExt, TryFutureExt};
 use num_traits::{FromPrimitive, ToPrimitive};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use tokio::time::sleep;
-use tokio_util::codec::{Decoder, Encoder, Framed};
+use tokio_util::codec::{Decoder, Encoder, Framed, FramedRead, FramedWrite};
 use crate::codec::{ClientConnectCodec, ClientPacketCodec, ensure_min_length, ServerConnectCodec, State};
 use crate::constants::*;
 use crate::errors::ZkError;
 use crate::proto::{ConnectRequest, ConnectResponse, GetDataRequest, RequestHeader, RequestPacket, ZkRequest, ZkResponse};
 use crate::record::Record;
+
+// c->p->b
+pub struct UpStreamConnection {
+    c2p_read_half: OwnedReadHalf,
+    p2b_write_half: OwnedWriteHalf,
+}
+
+// c<-p<-b
+pub struct DownStreamConnection {
+    b2p_read_half: OwnedReadHalf,
+    p2c_write_half: OwnedWriteHalf,
+}
+
+impl UpStreamConnection {
+    fn new(c2p_read_half: OwnedReadHalf, p2b_write_half: OwnedWriteHalf) -> Self {
+        return Self { c2p_read_half, p2b_write_half };
+    }
+    async fn pipe(&mut self) -> std::io::Result<()> {
+        let mut c2p_framed = FramedRead::new(&mut self.c2p_read_half, ServerPacketCodec::new(ServerConnectCodec {}));
+        let mut p2b_framed = FramedWrite::new(&mut self.p2b_write_half, ClientPacketCodec::new(ClientConnectCodec::new()));
+
+        while let Some(Ok(r)) = FramedRead::next(&mut c2p_framed).await {
+            println!("c->p: {:?}", r);
+            let _ = p2b_framed.send(r).await;
+        }
+        Ok(())
+    }
+}
+
+impl DownStreamConnection {
+    fn new(b2p_read_half: OwnedReadHalf, p2c_write_half: OwnedWriteHalf) -> Self {
+        return Self { b2p_read_half, p2c_write_half };
+    }
+    async fn pipe(&mut self) -> std::io::Result<u64> {
+        tokio::io::copy(&mut self.b2p_read_half, &mut self.p2c_write_half).await
+    }
+}
 
 pub struct ZkServer {}
 
@@ -38,7 +76,8 @@ impl ZkServer {
     }
 
     pub async fn handle_conn(mut c2p: Framed<TcpStream, ServerConnectCodec>, mut p2b: Framed<TcpStream, ClientConnectCodec>)
-                             -> Result<(Framed<TcpStream, ServerPacketCodec>, Framed<TcpStream, ClientPacketCodec>), ZkError> {
+    // -> Result<(Framed<TcpStream, ServerPacketCodec>, Framed<TcpStream, ClientPacketCodec>), ZkError> {
+                             -> Result<(), ZkError> {
         let mut c2p: Framed<TcpStream, ServerPacketCodec> = {
             let parts = c2p.into_parts();
             Framed::new(parts.io, ServerPacketCodec { xid: 0 })
@@ -47,25 +86,25 @@ impl ZkServer {
             let parts = p2b.into_parts();
             Framed::new(parts.io, ClientPacketCodec { xid: parts.codec.xid })
         };
-        println!("1. receive data from client");
-        // 1. receive data from client
-        while let Some(Ok(req)) = c2p.next().await {
-            println!("receive: {:?}", req);
-            println!("2. send to backend");
-            // 2. send to backend
-            p2b.send(req).await?;
 
-            // 3. wait for backend resp
-            println!("3. wait fro backend resp");
-            if let Some(Ok(resp)) = p2b.next().await {
-                println!("receive backend: {:?}", resp);
-                println!("4. send it to client");
-                // 4. send it to client
-                c2p.send(resp).await?;
-                println!(" send it to client done.....");
+        let c2p_parts = c2p.into_parts();
+        let (c2p_read_half, p2c_write_half) = c2p_parts.io.into_split();
+
+        let p2b_parts = p2b.into_parts();
+        let (b2p_read_half, p2b_write_half) = p2b_parts.io.into_split();
+
+        let mut upstream_conn = UpStreamConnection::new(c2p_read_half, p2b_write_half);
+        let mut downstream_conn = DownStreamConnection::new(b2p_read_half, p2c_write_half);
+
+        tokio::select! {
+            _ = upstream_conn.pipe() => {
+                println!("upstream_conn.pipe() done");
+            }
+            _ = downstream_conn.pipe() => {
+                println!("downstream_conn.pipe() done");
             }
         }
-        Ok((c2p, p2b))
+        Ok(())
     }
 
     pub async fn start(&self) -> Result<(), ZkError> {
