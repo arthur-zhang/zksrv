@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use bytes::{Buf, BufMut, BytesMut};
 
 use crate::errors::ZkError;
@@ -11,6 +12,23 @@ pub struct ConnectRequest {
     pub session_id: i64,
     pub passwd: Vec<u8>,
     pub read_only: bool,
+}
+
+impl Record for ConnectRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.protocol_version);
+        buffer.put_i64(self.last_zxid_seen);
+        buffer.put_i32(self.timeout);
+        buffer.put_i64(self.session_id);
+        buffer.put_i32(self.passwd.len() as i32);
+        buffer.extend_from_slice(&self.passwd);
+        buffer.put_u8(self.read_only as u8);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + 8 + 4 + 8 + 4 + self.passwd.len() + 1
+    }
 }
 
 impl ConnectRequest {
@@ -33,42 +51,17 @@ impl ConnectRequest {
         }
     }
 }
+#[derive(Debug)]
+pub struct PingRequest;
 
-impl Record for ZkRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        match self {
-            ZkRequest::GetData(req) => {
-                buffer.put_i32(req.path.len() as i32);
-                buffer.extend_from_slice(req.path.as_bytes());
-                buffer.put_u8(req.watch as u8);
-            }
-            ZkRequest::Ping => {}
-            ZkRequest::ConnectInit(r) => {
-                buffer.put_i32(r.protocol_version);
-                buffer.put_i64(r.last_zxid_seen);
-                buffer.put_i32(r.timeout);
-                buffer.put_i64(r.session_id);
-                buffer.put_i32(r.passwd.len() as i32);
-                buffer.extend_from_slice(&r.passwd);
-                buffer.put_u8(r.read_only as u8);
-            }
-        }
+impl Record for PingRequest {
+    fn serialize_into(&self, _buffer: &mut BytesMut) -> Result<(), ZkError> {
         Ok(())
     }
-
     fn size(&self) -> usize {
-        match self {
-            ZkRequest::GetData(req) => {
-                4 + req.path.len() + 1
-            }
-            ZkRequest::Ping => 0,
-            ZkRequest::ConnectInit(r) => {
-                4 + 8 + 4 + 8 + 4 + r.passwd.len() + 1
-            }
-        }
+        0
     }
 }
-
 
 #[derive(Debug)]
 pub struct GetDataRequest {
@@ -76,21 +69,83 @@ pub struct GetDataRequest {
     pub watch: bool,
 }
 
+impl Record for GetDataRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.path.len() as i32);
+        buffer.extend_from_slice(self.path.as_bytes());
+        buffer.put_u8(self.watch as u8);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.path.len() + 1
+    }
+}
 
 #[derive(Debug)]
-pub enum ZkRequest {
-    ConnectInit(ConnectRequest),
-    GetData(GetDataRequest),
-    Ping,
+pub struct Acl {
+    pub perms: i32,
+    pub scheme: Vec<u8>,
+    pub cred: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct CreateRequest {
+    pub path: String,
+    pub data: Vec<u8>,
+    pub acl: Vec<Acl>,
+    pub flags: i32,
+}
+
+impl Record for CreateRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.path.len() as i32);
+        buffer.extend_from_slice(self.path.as_bytes());
+        buffer.put_i32(self.data.len() as i32);
+        buffer.extend_from_slice(&self.data);
+        buffer.put_i32(self.acl.len() as i32);
+        for acl in &self.acl {
+            buffer.put_i32(acl.perms);
+            buffer.put_i32(acl.scheme.len() as i32);
+            buffer.extend_from_slice(&acl.scheme);
+            buffer.put_i32(acl.cred.len() as i32);
+            buffer.extend_from_slice(&acl.cred);
+        }
+        buffer.put_i32(self.flags);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.path.len() + 4 + self.data.len() + 4 + self.acl.iter().map(|a| 4 + 4 + a.scheme.len() + 4 + a.cred.len()).sum::<usize>() + 4
+    }
+}
+
+#[derive(Debug)]
+pub struct DeleteRequest {
+    pub path: String,
+    pub version: i32,
+}
+
+impl Record for DeleteRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.path.len() as i32);
+        buffer.extend_from_slice(self.path.as_bytes());
+        buffer.put_i32(self.version);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.path.len() + 4
+    }
 }
 
 #[derive(Debug)]
 pub struct RequestPacket {
     pub request_header: Option<RequestHeader>,
-    pub request: ZkRequest,
+    pub request: Box<dyn Record>,
 }
 
-impl Record for RequestPacket {
+impl Record for RequestPacket where {
     fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
         if let Some(header) = &self.request_header {
             header.serialize_into(buffer)?;

@@ -1,11 +1,11 @@
 use bytes::{Buf, BufMut};
 use num_derive::{FromPrimitive, ToPrimitive};
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::FromPrimitive;
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::constants::*;
 use crate::errors::ZkError;
-use crate::proto::{ConnectRequest, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader, RequestPacket, ZkRequest, ZkResponse};
+use crate::proto::{Acl, ConnectRequest, CreateRequest, DeleteRequest, GetDataRequest, GetDataResponse, PingRequest, ReplyHeader, RequestHeader, RequestPacket, ZkResponse};
 use crate::record::Record;
 
 pub fn maybe_read_bool(bytes: &mut bytes::BytesMut) -> bool {
@@ -132,7 +132,7 @@ impl ServerPacketCodec {
     pub fn new() -> Self {
         Self {}
     }
-    fn parse_connect(&self, bytes: &mut bytes::BytesMut) -> Result<ZkRequest, ZkError> {
+    fn parse_connect(&self, bytes: &mut bytes::BytesMut) -> Result<ConnectRequest, ZkError> {
         let connect_req = {
             // ensure_min_length(len as i32, XID_LENGTH + ZXID_LENGTH + TIMEOUT_LENGTH + SESSION_LENGTH + INT_LENGTH)?;
             // let protocol_version = bytes.get_i32();
@@ -152,7 +152,7 @@ impl ServerPacketCodec {
                 read_only,
             }
         };
-        Ok(ZkRequest::ConnectInit(connect_req))
+        Ok(connect_req)
     }
 }
 
@@ -173,9 +173,47 @@ fn ensure_max_len(len: usize) -> Result<(), ZkError> {
     Ok(())
 }
 
+fn get_acl(bytes: &mut bytes::BytesMut) -> Result<Vec<Acl>, ZkError> {
+    let len = bytes.get_i32();
+    if len <= 0 {
+        return Ok(vec![]);
+    }
+    if bytes.len() < len as usize {
+        return Err(ZkError::InvalidPacketLength(len));
+    }
+    ensure_max_len(len as usize)?;
+    let mut vec = vec![];
+    for _ in 0..len {
+        let perms = bytes.get_i32();
+        let scheme = get_data(bytes)?;
+        let cred = get_data(bytes)?;
+        vec.push(Acl {
+            perms,
+            scheme,
+            cred,
+        });
+    }
+    Ok(vec)
+}
+
+fn get_data(bytes: &mut bytes::BytesMut) -> Result<Vec<u8>, ZkError> {
+    let len = bytes.get_i32();
+    println!("get data: len: {}", len);
+    if len <= 0 {
+        return Ok(vec![]);
+    }
+    if bytes.len() < len as usize {
+        return Err(ZkError::InvalidPacketLength(len));
+    }
+    ensure_max_len(len as usize)?;
+    let mut vec = vec![0; len as usize];
+    bytes.copy_to_slice(&mut vec);
+    Ok(vec)
+}
+
 fn get_str(bytes: &mut bytes::BytesMut) -> Result<String, ZkError> {
     let len = bytes.get_i32();
-    if len == 0 {
+    if len <= 0 {
         return Ok("".to_string());
     }
     if bytes.len() < len as usize {
@@ -211,7 +249,7 @@ impl Decoder for ServerPacketCodec {
                     let req = self.parse_connect(src)?; // todo
                     return Ok(Some(RequestPacket {
                         request_header: None,
-                        request: req,
+                        request: Box::new(req),
                     }));
                 }
                 XidCodes::WatchXid => {}
@@ -219,7 +257,7 @@ impl Decoder for ServerPacketCodec {
                     let opcode = src.get_i32();
                     return Ok(Some(RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: ZkRequest::Ping,
+                        request: Box::new(PingRequest {}),
                     }));
                 }
                 XidCodes::AuthXid => {}
@@ -230,7 +268,7 @@ impl Decoder for ServerPacketCodec {
 
         let opcode = src.get_i32();
         let opcode_enum = OpCodes::from_i32(opcode).unwrap();
-        println!("{:?}", opcode_enum);
+        println!("opcode_enum: {:?}", opcode_enum);
         match opcode_enum {
             OpCodes::GetData => {
                 let path = get_str(src)?;
@@ -242,11 +280,44 @@ impl Decoder for ServerPacketCodec {
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: ZkRequest::GetData(req),
+                        request: Box::new(req),
                     }));
             }
-            OpCodes::Create => {}
-            OpCodes::Delete => {}
+            OpCodes::Create | OpCodes::Create2 => {
+                let path = get_str(src)?;
+                println!("path: {:?}", path);
+                let data = get_data(src)?;
+                println!("data: {:?}", data);
+                let acl = get_acl(src)?;
+                println!("acl: {:?}", acl);
+                let flags = src.get_i32();
+                println!("flags: {}", flags);
+                let req = CreateRequest {
+                    path,
+                    data,
+                    acl,
+                    flags,
+                };
+                println!("req: {:?}", req);
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, opcode }),
+                        request: Box::new(req),
+                    }));
+            }
+            OpCodes::Delete => {
+                let path = get_str(src)?;
+                let version = src.get_i32();
+                let req = DeleteRequest {
+                    path,
+                    version,
+                };
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, opcode }),
+                        request: Box::new(req),
+                    }));
+            }
             OpCodes::Exists => {}
             OpCodes::SetData => {}
             OpCodes::GetAcl => {}
@@ -256,13 +327,17 @@ impl Decoder for ServerPacketCodec {
             OpCodes::GetChildren2 => {}
             OpCodes::Check => {}
             OpCodes::Multi => {}
-            OpCodes::Create2 => {}
             OpCodes::Reconfig => {}
             OpCodes::CheckWatches => {}
             OpCodes::RemoveWatches => {}
             OpCodes::CreateContainer => {}
             OpCodes::CreateTtl => {}
-            OpCodes::Close => {}
+            OpCodes::Close => {
+                return Ok(Some(RequestPacket {
+                    request_header: Some(RequestHeader { xid, opcode }),
+                    request: Box::new(PingRequest {}),
+                }));
+            }
             OpCodes::SetAuth => {}
             OpCodes::SetWatches => {}
             OpCodes::GetEphemerals => {}
