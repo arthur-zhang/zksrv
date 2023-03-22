@@ -3,7 +3,6 @@ use crate::server::ZkServer;
 
 mod codec;
 mod errors;
-mod proto;
 mod server;
 mod constants;
 mod record;
