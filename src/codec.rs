@@ -81,6 +81,7 @@ impl Record for PingRequest {
     }
 }
 
+
 #[derive(Debug)]
 pub struct GetDataRequest {
     pub path: String,
@@ -371,9 +372,133 @@ impl Deserialize for SetAclRequest {
 }
 
 #[derive(Debug)]
+pub struct SetWatchesRequest {
+    relative_zxid: i64,
+    data_watches: Vec<String>,
+    exist_watches: Vec<String>,
+    child_watches: Vec<String>,
+}
+
+fn get_str_vec(bytes: &mut BytesMut) -> Result<Vec<String>, ZkError> {
+    let count = bytes.get_i32();
+    let mut vec = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let len = bytes.get_i32();
+        let s = bytes.split_to(len as usize);
+        vec.push(String::from_utf8(s.to_vec()).map_err(|e| ZkError::InvalidString)?);
+    }
+    Ok(vec)
+}
+
+impl Record for SetWatchesRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i64(self.relative_zxid);
+        buffer.put_i32(self.data_watches.len() as i32);
+        for path in &self.data_watches {
+            buffer.put_i32(path.len() as i32);
+            buffer.extend_from_slice(path.as_bytes());
+        }
+        buffer.put_i32(self.exist_watches.len() as i32);
+        for path in &self.exist_watches {
+            buffer.put_i32(path.len() as i32);
+            buffer.extend_from_slice(path.as_bytes());
+        }
+        buffer.put_i32(self.child_watches.len() as i32);
+        for path in &self.child_watches {
+            buffer.put_i32(path.len() as i32);
+            buffer.extend_from_slice(path.as_bytes());
+        }
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        8 + 4 + self.data_watches.iter().map(|p| 4 + p.len()).sum::<usize>() + 4
+            + self.exist_watches.iter().map(|p| 4 + p.len()).sum::<usize>()
+            + 4 + self.child_watches.iter().map(|p| 4 + p.len()).sum::<usize>()
+    }
+}
+
+impl Deserialize for SetWatchesRequest {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let relative_zxid = bytes.get_i64();
+        let data_watches = get_str_vec(bytes)?;
+        let exist_watches = get_str_vec(bytes)?;
+        let child_watches = get_str_vec(bytes)?;
+        let req = SetWatchesRequest {
+            relative_zxid,
+            data_watches,
+            exist_watches,
+            child_watches,
+        };
+        Ok(req)
+    }
+}
+
+#[derive(Debug)]
+pub enum Request {
+    Connect(ConnectRequest),
+    Create(CreateRequest),
+    Delete(DeleteRequest),
+    Exists(ExistsRequest),
+    GetData(GetDataRequest),
+    SetData(SetDataRequest),
+    GetAcl(GetAclRequest),
+    SetAcl(SetAclRequest),
+    GetChildren(GetChildrenRequest),
+    GetChildren2(GetChildrenRequest),
+    Ping(PingRequest),
+    GetChildren3(GetChildrenRequest),
+    // Check(CheckRequest),
+// Multi(MultiRequest),
+    Close(PingRequest),
+    SetWatches(SetWatchesRequest),
+}
+
+impl Record for Request {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        match self {
+            Request::Create(req) => { req.serialize_into(buffer) }
+            Request::Delete(req) => { req.serialize_into(buffer) }
+            Request::Exists(req) => { req.serialize_into(buffer) }
+            Request::GetData(req) => { req.serialize_into(buffer) }
+            Request::SetData(req) => { req.serialize_into(buffer) }
+            Request::GetAcl(req) => { req.serialize_into(buffer) }
+            Request::SetAcl(req) => { req.serialize_into(buffer) }
+            Request::GetChildren(req) => { req.serialize_into(buffer) }
+            Request::GetChildren2(req) => { req.serialize_into(buffer) }
+            Request::Ping(req) => { req.serialize_into(buffer) }
+            Request::GetChildren3(req) => { req.serialize_into(buffer) }
+            Request::Close(req) => { req.serialize_into(buffer) }
+            Request::SetWatches(req) => { req.serialize_into(buffer) }
+            Request::Connect(req) => { req.serialize_into(buffer) }
+        }
+    }
+
+    fn size(&self) -> usize {
+        match self {
+            Request::Create(req) => { req.size() }
+            Request::Delete(req) => { req.size() }
+            Request::Exists(req) => { req.size() }
+            Request::GetData(req) => { req.size() }
+            Request::SetData(req) => { req.size() }
+            Request::GetAcl(req) => { req.size() }
+            Request::SetAcl(req) => { req.size() }
+            Request::GetChildren(req) => { req.size() }
+            Request::GetChildren2(req) => { req.size() }
+            Request::Ping(req) => { req.size() }
+            Request::GetChildren3(req) => { req.size() }
+            Request::Close(req) => { req.size() }
+            Request::SetWatches(req) => { req.size() }
+            Request::Connect(req) => { req.size() }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct RequestPacket {
     pub request_header: Option<RequestHeader>,
-    pub request: Box<dyn Record>,
+    // pub request: Box<dyn Record>,
+    pub request: Request,
 }
 
 impl Record for RequestPacket {
@@ -414,6 +539,7 @@ pub enum ZkResponse {
     GetData(GetDataResponse),
     Ping(ReplyHeader),
 }
+
 
 impl Record for ZkResponse {
     fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
@@ -606,7 +732,8 @@ impl ServerPacketCodec {
                     println!("connect req: {:?}", req);
                     return Ok(Some(RequestPacket {
                         request_header: None,
-                        request: Box::new(req),
+                        // request: Box::new(req),
+                        request: Request::Connect(req),
                     }));
                 }
                 XidCodes::WatchXid => {}
@@ -614,7 +741,8 @@ impl ServerPacketCodec {
                     let opcode = src.get_i32();
                     return Ok(Some(RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(PingRequest {}),
+                        // request: Box::new(PingRequest {}),
+                        request: Request::Ping(PingRequest {}),
                     }));
                 }
                 XidCodes::AuthXid => {}
@@ -632,7 +760,8 @@ impl ServerPacketCodec {
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(req),
+                        // request: Box::new(req),
+                        request: Request::GetData(req),
                     }));
             }
             OpCodes::Create | OpCodes::Create2 | OpCodes::CreateTtl | OpCodes::CreateContainer => {
@@ -640,7 +769,8 @@ impl ServerPacketCodec {
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(req),
+                        // request: Box::new(req),
+                        request: Request::Create(req),
                     }));
             }
             OpCodes::SetData => {
@@ -648,7 +778,7 @@ impl ServerPacketCodec {
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(req),
+                        request: Request::SetData(req),
                     }));
             }
             OpCodes::GetChildren | OpCodes::GetChildren2 => {
@@ -656,7 +786,7 @@ impl ServerPacketCodec {
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(req),
+                        request: Request::GetChildren(req),
                     }));
             }
             OpCodes::Delete => {
@@ -664,7 +794,7 @@ impl ServerPacketCodec {
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(req),
+                        request: Request::Delete(req),
                     }));
             }
             OpCodes::Exists => {
@@ -672,7 +802,7 @@ impl ServerPacketCodec {
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(req),
+                        request: Request::Exists(req),
                     }));
             }
             OpCodes::GetAcl => {
@@ -680,7 +810,7 @@ impl ServerPacketCodec {
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(req),
+                        request: Request::GetAcl(req),
                     }));
             }
             OpCodes::SetAcl => {
@@ -688,7 +818,7 @@ impl ServerPacketCodec {
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(req),
+                        request: Request::SetAcl(req),
                     }));
             }
             OpCodes::Sync => {}
@@ -700,11 +830,18 @@ impl ServerPacketCodec {
             OpCodes::Close => {
                 return Ok(Some(RequestPacket {
                     request_header: Some(RequestHeader { xid, opcode }),
-                    request: Box::new(PingRequest {}),
+                    request: Request::Close(PingRequest {}),
                 }));
             }
             OpCodes::SetAuth => {}
-            OpCodes::SetWatches => {}
+            OpCodes::SetWatches => {
+                let req = SetWatchesRequest::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, opcode }),
+                        request: Request::SetWatches(req),
+                    }));
+            }
             OpCodes::GetEphemerals => {}
             OpCodes::GetAllChildrenNumber => {}
             OpCodes::SetWatches2 => {}
@@ -734,6 +871,17 @@ impl Decoder for ServerPacketCodec {
                 }
             }
         };
+    }
+}
+
+impl Encoder<ZkResponse> for ServerPacketCodec {
+    type Error = ZkError;
+
+    fn encode(&mut self, item: ZkResponse, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let mut buf = BytesMut::new();
+        buf.reserve(item.size());
+        item.serialize_into(&mut buf)?;
+        self.inner.encode(buf.freeze(), dst).map_err(|e| ZkError::EncodeError)
     }
 }
 

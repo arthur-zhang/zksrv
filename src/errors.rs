@@ -3,6 +3,7 @@ pub enum ZkError {
     SocketError(String),
     InvalidPacketLength(i32),
     DecodeError,
+    EncodeError,
     InvalidString,
 }
 
