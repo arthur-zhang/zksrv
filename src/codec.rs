@@ -226,6 +226,37 @@ impl Record for DeleteRequest {
 }
 
 #[derive(Debug)]
+pub struct GetChildrenRequest {
+    pub path: String,
+    pub watch: bool,
+}
+
+impl Record for GetChildrenRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.path.len() as i32);
+        buffer.extend_from_slice(self.path.as_bytes());
+        buffer.put_u8(self.watch as u8);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.path.len() + 1
+    }
+}
+
+impl Deserialize for GetChildrenRequest {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let path = get_str(bytes)?;
+        let watch = bytes.get_u8();
+        let req = GetChildrenRequest {
+            path,
+            watch: watch != 0,
+        };
+        Ok(req)
+    }
+}
+
+#[derive(Debug)]
 pub struct RequestPacket {
     pub request_header: Option<RequestHeader>,
     pub request: Box<dyn Record>,
@@ -533,11 +564,17 @@ impl ServerPacketCodec {
                         request: Box::new(req),
                     }));
             }
-            OpCodes::GetChildren2 => {}
+            OpCodes::GetChildren | OpCodes::GetChildren2 => {
+                let req = GetChildrenRequest::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, opcode }),
+                        request: Box::new(req),
+                    }));
+            }
             OpCodes::Exists => {}
             OpCodes::GetAcl => {}
             OpCodes::SetAcl => {}
-            OpCodes::GetChildren => {}
             OpCodes::Sync => {}
             OpCodes::Check => {}
             OpCodes::Multi => {}
