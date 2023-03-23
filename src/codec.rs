@@ -1,5 +1,4 @@
-use std::io::Cursor;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::FromPrimitive;
 use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
@@ -7,7 +6,6 @@ use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
 use crate::constants::*;
 use crate::errors::ZkError;
 use crate::record::{Deserialize, Record};
-
 
 #[derive(Debug)]
 pub struct ConnectRequest {
@@ -125,7 +123,7 @@ pub struct CreateRequest {
 }
 
 impl Deserialize for CreateRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
         let path = get_str(bytes)?;
         let data = get_data(bytes)?;
         let acl = get_acl(bytes)?;
@@ -170,7 +168,7 @@ pub struct DeleteRequest {
 }
 
 impl Deserialize for DeleteRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
         let path = get_str(bytes)?;
         let version = bytes.get_i32();
         let req = DeleteRequest {

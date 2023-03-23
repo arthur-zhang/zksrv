@@ -51,8 +51,9 @@ impl ZkServer {
     pub fn new() -> ZkServer {
         ZkServer {}
     }
-    pub async fn handle_conn(c2p_stream: TcpStream, p2b_stream: TcpStream)
-                             -> Result<(), ZkError> {
+    pub async fn handle_conn(c2p_stream: TcpStream) -> Result<(), ZkError> {
+        let p2b_stream = TcpStream::connect("127.0.0.1:2181").await.unwrap();
+
         let (c2p_read_half, p2c_write_half) = c2p_stream.into_split();
         let (b2p_read_half, p2b_write_half) = p2b_stream.into_split();
 
@@ -71,12 +72,12 @@ impl ZkServer {
     }
 
     pub async fn start(&self) -> Result<(), ZkError> {
-        let listener = TcpListener::bind("0.0.0.0:2182").await.unwrap();
+        let listener = TcpListener::bind("[::]:2182").await.unwrap();
+        println!("listen done");
         loop {
             let (c2p_socket, peer_addr) = listener.accept().await.unwrap();
             println!("peer_addr: {:?}", peer_addr);
-            let p2b_stream = TcpStream::connect("127.0.0.1:2181").await.unwrap();
-            Self::handle_conn(c2p_socket, p2b_stream).await?;
+            Self::handle_conn(c2p_socket).await?;
         }
         Ok(())
     }
