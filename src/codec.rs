@@ -1,4 +1,5 @@
 use bytes::{Buf, BufMut};
+use lazy_static::lazy_static;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::FromPrimitive;
 use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
@@ -198,7 +199,7 @@ pub struct RequestPacket {
     pub request: Box<dyn Record>,
 }
 
-impl Record for RequestPacket where {
+impl Record for RequestPacket {
     fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
         if let Some(header) = &self.request_header {
             header.serialize_into(buffer)?;
@@ -374,7 +375,18 @@ pub enum XidCodes {
     SetWatchesXid = -8,
 }
 
-pub struct ClientPacketCodec;
+lazy_static! {
+    static ref LENGTH_DELIMITED_CODEC: LengthDelimitedCodec
+        = LengthDelimitedCodec::builder()
+        .max_frame_length(8 * 1_024 * 1_024)
+        .length_field_length(4)
+        .length_field_offset(0)
+        .length_adjustment(0)
+        .big_endian()
+        .new_codec();
+}
+
+pub struct ClientPacketCodec {}
 
 impl ClientPacketCodec {
     pub fn new() -> Self {
@@ -386,7 +398,9 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
     type Error = ZkError;
 
     fn encode(&mut self, item: RequestPacket, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
-        dst.put_i32(item.size() as i32);
+        let n = item.size();
+        dst.reserve(n + 4);
+        dst.put_i32(n as i32);
         item.serialize_into(dst)?;
         Ok(())
     }
@@ -399,13 +413,7 @@ pub struct ServerPacketCodec {
 impl ServerPacketCodec {
     pub fn new() -> Self {
         Self {
-            inner:
-            LengthDelimitedCodec::builder().max_frame_length(8 * 1_024 * 1_024)
-                .length_field_length(4)
-                .length_field_offset(0)
-                .length_adjustment(0)
-                .big_endian()
-                .new_codec()
+            inner: LENGTH_DELIMITED_CODEC.clone()
         }
     }
     fn parse_connect(&self, bytes: &mut bytes::BytesMut) -> Result<ConnectRequest, ZkError> {
