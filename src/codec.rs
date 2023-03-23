@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, BytesMut};
 use lazy_static::lazy_static;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::FromPrimitive;
@@ -122,6 +122,38 @@ pub struct CreateRequest {
     pub acl: Vec<Acl>,
     pub flags: i32,
 }
+
+#[derive(Debug)]
+pub struct SetDataRequest {
+    path: String,
+    data: Vec<u8>,
+    version: i32,
+}
+
+impl Deserialize for SetDataRequest {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let path = get_str(bytes)?;
+        let data = get_data(bytes)?;
+        let version = bytes.get_i32();
+        Ok(SetDataRequest { path, data, version })
+    }
+}
+
+impl Record for SetDataRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.path.len() as i32);
+        buffer.extend_from_slice(self.path.as_bytes());
+        buffer.put_i32(self.data.len() as i32);
+        buffer.extend_from_slice(&self.data);
+        buffer.put_i32(self.version);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.path.len() + 4 + self.data.len() + 4
+    }
+}
+
 
 impl Deserialize for CreateRequest {
     fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
@@ -378,7 +410,7 @@ pub enum XidCodes {
 lazy_static! {
     static ref LENGTH_DELIMITED_CODEC: LengthDelimitedCodec
         = LengthDelimitedCodec::builder()
-        .max_frame_length(8 * 1_024 * 1_024)
+        .max_frame_length(1 * 1_024 * 1_024)
         .length_field_length(4)
         .length_field_offset(0)
         .length_adjustment(0)
@@ -477,8 +509,16 @@ impl ServerPacketCodec {
                         request: Box::new(req),
                     }));
             }
-            OpCodes::Create | OpCodes::Create2 => {
+            OpCodes::Create | OpCodes::Create2 | OpCodes::CreateTtl | OpCodes::CreateContainer => {
                 let req = CreateRequest::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, opcode }),
+                        request: Box::new(req),
+                    }));
+            }
+            OpCodes::SetData => {
+                let req = SetDataRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
@@ -493,20 +533,17 @@ impl ServerPacketCodec {
                         request: Box::new(req),
                     }));
             }
+            OpCodes::GetChildren2 => {}
             OpCodes::Exists => {}
-            OpCodes::SetData => {}
             OpCodes::GetAcl => {}
             OpCodes::SetAcl => {}
             OpCodes::GetChildren => {}
             OpCodes::Sync => {}
-            OpCodes::GetChildren2 => {}
             OpCodes::Check => {}
             OpCodes::Multi => {}
             OpCodes::Reconfig => {}
             OpCodes::CheckWatches => {}
             OpCodes::RemoveWatches => {}
-            OpCodes::CreateContainer => {}
-            OpCodes::CreateTtl => {}
             OpCodes::Close => {
                 return Ok(Some(RequestPacket {
                     request_header: Some(RequestHeader { xid, opcode }),
