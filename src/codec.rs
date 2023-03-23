@@ -257,6 +257,37 @@ impl Deserialize for GetChildrenRequest {
 }
 
 #[derive(Debug)]
+pub struct ExistsRequest {
+    pub path: String,
+    pub watch: bool,
+}
+
+impl Record for ExistsRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.path.len() as i32);
+        buffer.extend_from_slice(self.path.as_bytes());
+        buffer.put_u8(self.watch as u8);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.path.len() + 1
+    }
+}
+
+impl Deserialize for ExistsRequest {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let path = get_str(bytes)?;
+        let watch = bytes.get_u8();
+        let req = ExistsRequest {
+            path,
+            watch: watch != 0,
+        };
+        Ok(req)
+    }
+}
+
+#[derive(Debug)]
 pub struct RequestPacket {
     pub request_header: Option<RequestHeader>,
     pub request: Box<dyn Record>,
@@ -479,26 +510,7 @@ impl ServerPacketCodec {
             inner: LENGTH_DELIMITED_CODEC.clone()
         }
     }
-    fn parse_connect(&self, bytes: &mut bytes::BytesMut) -> Result<ConnectRequest, ZkError> {
-        let connect_req = {
-            let last_zxid_seen = bytes.get_i64();
-            let timeout = bytes.get_i32();
-            let session_id = bytes.get_i64();
-            let passwd_len = bytes.get_i32();
-            let mut passwd = vec![0; passwd_len as usize];
-            bytes.copy_to_slice(&mut passwd);
-            let read_only = maybe_read_bool(bytes);
-            ConnectRequest {
-                protocol_version: 0,
-                last_zxid_seen,
-                timeout,
-                session_id,
-                passwd,
-                read_only,
-            }
-        };
-        Ok(connect_req)
-    }
+
     fn decode_inner(src: &mut bytes::BytesMut) -> Result<Option<RequestPacket>, ZkError> {
         let xid = src.get_i32();
         let xid_enum = XidCodes::from_i32(xid);
@@ -556,14 +568,6 @@ impl ServerPacketCodec {
                         request: Box::new(req),
                     }));
             }
-            OpCodes::Delete => {
-                let req = DeleteRequest::deserialize(src)?;
-                return Ok(Some(
-                    RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
-                        request: Box::new(req),
-                    }));
-            }
             OpCodes::GetChildren | OpCodes::GetChildren2 => {
                 let req = GetChildrenRequest::deserialize(src)?;
                 return Ok(Some(
@@ -572,7 +576,22 @@ impl ServerPacketCodec {
                         request: Box::new(req),
                     }));
             }
-            OpCodes::Exists => {}
+            OpCodes::Delete => {
+                let req = DeleteRequest::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, opcode }),
+                        request: Box::new(req),
+                    }));
+            }
+            OpCodes::Exists => {
+                let req = ExistsRequest::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, opcode }),
+                        request: Box::new(req),
+                    }));
+            }
             OpCodes::GetAcl => {}
             OpCodes::SetAcl => {}
             OpCodes::Sync => {}
