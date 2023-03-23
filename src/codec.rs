@@ -1,7 +1,8 @@
-use bytes::{Buf, BufMut};
+use std::io::Cursor;
+use bytes::{Buf, BufMut, BytesMut};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::FromPrimitive;
-use tokio_util::codec::{Decoder, Encoder};
+use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
 
 use crate::constants::*;
 use crate::errors::ZkError;
@@ -16,6 +17,31 @@ pub struct ConnectRequest {
     pub session_id: i64,
     pub passwd: Vec<u8>,
     pub read_only: bool,
+}
+
+impl ConnectRequest {
+    fn deserialize(bytes: &mut bytes::BytesMut) -> Self {
+        let last_zxid_seen = bytes.get_i64();
+        let timeout = bytes.get_i32();
+        let session_id = bytes.get_i64();
+        let passwd_len = bytes.get_i32();
+        let passwd = if passwd_len > 0 {
+            let mut passwd = vec![0; passwd_len as usize];
+            bytes.copy_to_slice(&mut passwd);
+            passwd
+        } else {
+            vec![]
+        };
+        let read_only = maybe_read_bool(bytes);
+        ConnectRequest {
+            protocol_version: 0,
+            last_zxid_seen,
+            timeout,
+            session_id,
+            passwd,
+            read_only,
+        }
+    }
 }
 
 impl Record for ConnectRequest {
@@ -33,28 +59,10 @@ impl Record for ConnectRequest {
     fn size(&self) -> usize {
         4 + 8 + 4 + 8 + 4 + self.passwd.len() + 1
     }
+
+    //
 }
 
-impl ConnectRequest {
-    pub fn deserialize(mut bytes: &mut bytes::BytesMut) -> Self {
-        let len = bytes.get_i32();
-        let protocol_version = bytes.get_i32();
-        let last_zxid_seen = bytes.get_i64();
-        let timeout = bytes.get_i32();
-        let session_id = bytes.get_i64();
-        let passwd_len = bytes.get_i32();
-        let mut passwd = vec![0; passwd_len as usize];
-        let read_only = bytes.get_u8();
-        ConnectRequest {
-            protocol_version,
-            last_zxid_seen,
-            timeout,
-            session_id,
-            passwd,
-            read_only: read_only != 0,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct PingRequest;
@@ -344,11 +352,21 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
     }
 }
 
-pub struct ServerPacketCodec {}
+pub struct ServerPacketCodec {
+    inner: LengthDelimitedCodec,
+}
 
 impl ServerPacketCodec {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            inner:
+            LengthDelimitedCodec::builder().max_frame_length(8 * 1_024 * 1_024)
+                .length_field_length(4)
+                .length_field_offset(0)
+                .length_adjustment(0)
+                .big_endian()
+                .new_codec()
+        }
     }
     fn parse_connect(&self, bytes: &mut bytes::BytesMut) -> Result<ConnectRequest, ZkError> {
         let connect_req = {
@@ -372,29 +390,16 @@ impl ServerPacketCodec {
         };
         Ok(connect_req)
     }
-}
-
-impl Decoder for ServerPacketCodec {
-    type Item = RequestPacket;
-    type Error = ZkError;
-
-    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        if src.len() < 4 {
-            return Ok(None);
-        }
-
-        let packet_len = src.get_i32();
-        ensure_min_length(packet_len, XID_LENGTH + INT_LENGTH)?; // xid + opcode
-        ensure_max_len(packet_len as usize)?;
-
+    fn decode_inner(src: &mut bytes::BytesMut) -> Result<Option<RequestPacket>, ZkError> {
         let xid = src.get_i32();
-        println!("packet_len:{} xid: {:?}", packet_len, xid);
         let xid_enum = XidCodes::from_i32(xid);
-        // println!("packet_len:{} xid: {:?}", packet_len, xid_enum);
+
+        println!("xid:{} xid: {:?}", xid, xid_enum);
         if let Some(xid_enum) = xid_enum {
             match xid_enum {
                 XidCodes::ConnectXid => {
-                    let req = self.parse_connect(src)?; // todo
+                    let req = ConnectRequest::deserialize(src);
+                    println!("connect req: {:?}", req);
                     return Ok(Some(RequestPacket {
                         request_header: None,
                         request: Box::new(req),
@@ -433,20 +438,15 @@ impl Decoder for ServerPacketCodec {
             }
             OpCodes::Create | OpCodes::Create2 => {
                 let path = get_str(src)?;
-                println!("path: {:?}", path);
                 let data = get_data(src)?;
-                println!("data: {:?}", data);
                 let acl = get_acl(src)?;
-                println!("acl: {:?}", acl);
                 let flags = src.get_i32();
-                println!("flags: {}", flags);
                 let req = CreateRequest {
                     path,
                     data,
                     acl,
                     flags,
                 };
-                println!("req: {:?}", req);
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
@@ -494,6 +494,29 @@ impl Decoder for ServerPacketCodec {
             _ => {}
         }
         unreachable!()
+    }
+}
+
+impl Decoder for ServerPacketCodec {
+    type Item = RequestPacket;
+    type Error = ZkError;
+
+    fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        return match self.inner.decode(src) {
+            Err(_) => {
+                Err(ZkError::DecodeError)
+            }
+            Ok(res) => {
+                match res {
+                    None => {
+                        Ok(None)
+                    }
+                    Some(mut src) => {
+                        Self::decode_inner(&mut src)
+                    }
+                }
+            }
+        };
     }
 }
 
