@@ -1,15 +1,11 @@
-use std::sync::mpsc::Receiver;
 use bytes::{BufMut, BytesMut};
 use futures::{SinkExt, StreamExt};
-use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
-use tokio_util::either::Either;
 
-use crate::codec::{ClientPacketCodec, ReplyHeader, Request, RequestPacket, ServerPacketCodec, ZkResponse};
+use crate::codec::{ClientPacketCodec, ReplyHeader, Request, ServerPacketCodec, ZkResponse};
 use crate::errors::ZkError;
 use crate::record::Record;
 
