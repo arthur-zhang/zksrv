@@ -6,7 +6,7 @@ use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
 
 use crate::constants::*;
 use crate::errors::ZkError;
-use crate::record::Record;
+use crate::record::{Deserialize, Record};
 
 
 #[derive(Debug)]
@@ -19,8 +19,10 @@ pub struct ConnectRequest {
     pub read_only: bool,
 }
 
-impl ConnectRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Self {
+impl ConnectRequest {}
+
+impl Deserialize for ConnectRequest {
+    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
         let last_zxid_seen = bytes.get_i64();
         let timeout = bytes.get_i32();
         let session_id = bytes.get_i64();
@@ -33,14 +35,14 @@ impl ConnectRequest {
             vec![]
         };
         let read_only = maybe_read_bool(bytes);
-        ConnectRequest {
+        Ok(ConnectRequest {
             protocol_version: 0,
             last_zxid_seen,
             timeout,
             session_id,
             passwd,
             read_only,
-        }
+        })
     }
 }
 
@@ -59,13 +61,17 @@ impl Record for ConnectRequest {
     fn size(&self) -> usize {
         4 + 8 + 4 + 8 + 4 + self.passwd.len() + 1
     }
-
-    //
 }
 
 
 #[derive(Debug)]
 pub struct PingRequest;
+
+impl Deserialize for PingRequest {
+    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
+        Ok(PingRequest {})
+    }
+}
 
 impl Record for PingRequest {
     fn serialize_into(&self, _buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
@@ -80,6 +86,14 @@ impl Record for PingRequest {
 pub struct GetDataRequest {
     pub path: String,
     pub watch: bool,
+}
+
+impl Deserialize for GetDataRequest {
+    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
+        let path = get_str(bytes)?;
+        let watch = bytes.get_u8() == 1;
+        Ok(GetDataRequest { path, watch })
+    }
 }
 
 impl Record for GetDataRequest {
@@ -110,6 +124,22 @@ pub struct CreateRequest {
     pub flags: i32,
 }
 
+impl Deserialize for CreateRequest {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let path = get_str(bytes)?;
+        let data = get_data(bytes)?;
+        let acl = get_acl(bytes)?;
+        let flags = bytes.get_i32();
+        let req = CreateRequest {
+            path,
+            data,
+            acl,
+            flags,
+        };
+        Ok(req)
+    }
+}
+
 impl Record for CreateRequest {
     fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
         buffer.put_i32(self.path.len() as i32);
@@ -137,6 +167,18 @@ impl Record for CreateRequest {
 pub struct DeleteRequest {
     pub path: String,
     pub version: i32,
+}
+
+impl Deserialize for DeleteRequest {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let path = get_str(bytes)?;
+        let version = bytes.get_i32();
+        let req = DeleteRequest {
+            path,
+            version,
+        };
+        Ok(req)
+    }
 }
 
 impl Record for DeleteRequest {
@@ -370,8 +412,6 @@ impl ServerPacketCodec {
     }
     fn parse_connect(&self, bytes: &mut bytes::BytesMut) -> Result<ConnectRequest, ZkError> {
         let connect_req = {
-            // ensure_min_length(len as i32, XID_LENGTH + ZXID_LENGTH + TIMEOUT_LENGTH + SESSION_LENGTH + INT_LENGTH)?;
-            // let protocol_version = bytes.get_i32();
             let last_zxid_seen = bytes.get_i64();
             let timeout = bytes.get_i32();
             let session_id = bytes.get_i64();
@@ -398,7 +438,7 @@ impl ServerPacketCodec {
         if let Some(xid_enum) = xid_enum {
             match xid_enum {
                 XidCodes::ConnectXid => {
-                    let req = ConnectRequest::deserialize(src);
+                    let req = ConnectRequest::deserialize(src)?;
                     println!("connect req: {:?}", req);
                     return Ok(Some(RequestPacket {
                         request_header: None,
@@ -424,12 +464,7 @@ impl ServerPacketCodec {
         println!("opcode_enum: {:?}", opcode_enum);
         match opcode_enum {
             OpCodes::GetData => {
-                let path = get_str(src)?;
-                let watch = src.get_u8() == 1;
-                let req = GetDataRequest {
-                    path,
-                    watch,
-                };
+                let req = GetDataRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
@@ -437,16 +472,7 @@ impl ServerPacketCodec {
                     }));
             }
             OpCodes::Create | OpCodes::Create2 => {
-                let path = get_str(src)?;
-                let data = get_data(src)?;
-                let acl = get_acl(src)?;
-                let flags = src.get_i32();
-                let req = CreateRequest {
-                    path,
-                    data,
-                    acl,
-                    flags,
-                };
+                let req = CreateRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
@@ -454,12 +480,7 @@ impl ServerPacketCodec {
                     }));
             }
             OpCodes::Delete => {
-                let path = get_str(src)?;
-                let version = src.get_i32();
-                let req = DeleteRequest {
-                    path,
-                    version,
-                };
+                let req = DeleteRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, opcode }),
