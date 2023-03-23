@@ -288,6 +288,89 @@ impl Deserialize for ExistsRequest {
 }
 
 #[derive(Debug)]
+pub struct GetAclRequest {
+    pub path: String,
+}
+
+impl Record for GetAclRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.path.len() as i32);
+        buffer.extend_from_slice(self.path.as_bytes());
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.path.len()
+    }
+}
+
+impl Deserialize for GetAclRequest {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let path = get_str(bytes)?;
+        let req = GetAclRequest {
+            path,
+        };
+        Ok(req)
+    }
+}
+
+
+#[derive(Debug)]
+pub struct SetAclRequest {
+    path: String,
+    acl: Vec<Acl>,
+    version: i32,
+}
+
+impl Record for SetAclRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.path.len() as i32);
+        buffer.extend_from_slice(self.path.as_bytes());
+        buffer.put_i32(self.acl.len() as i32);
+        for acl in &self.acl {
+            buffer.put_i32(acl.perms);
+            buffer.put_i32(acl.scheme.len() as i32);
+            buffer.extend_from_slice(&acl.scheme);
+            buffer.put_i32(acl.cred.len() as i32);
+            buffer.extend_from_slice(&acl.cred);
+        }
+        buffer.put_i32(self.version);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.path.len() + 4 + self.acl.iter().map(|a| 4 + 4 + a.scheme.len() + 4 + a.cred.len()).sum::<usize>() + 4
+    }
+}
+
+impl Deserialize for SetAclRequest {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let path = get_str(bytes)?;
+        let acl_count = bytes.get_i32();
+        let mut acl = Vec::with_capacity(acl_count as usize);
+        for _ in 0..acl_count {
+            let perms = bytes.get_i32();
+            let scheme_len = bytes.get_i32();
+            let scheme = bytes.split_to(scheme_len as usize).to_vec();
+            let cred_len = bytes.get_i32();
+            let cred = bytes.split_to(cred_len as usize).to_vec();
+            acl.push(Acl {
+                perms,
+                scheme,
+                cred,
+            });
+        }
+        let version = bytes.get_i32();
+        let req = SetAclRequest {
+            path,
+            acl,
+            version,
+        };
+        Ok(req)
+    }
+}
+
+#[derive(Debug)]
 pub struct RequestPacket {
     pub request_header: Option<RequestHeader>,
     pub request: Box<dyn Record>,
@@ -592,8 +675,22 @@ impl ServerPacketCodec {
                         request: Box::new(req),
                     }));
             }
-            OpCodes::GetAcl => {}
-            OpCodes::SetAcl => {}
+            OpCodes::GetAcl => {
+                let req = GetAclRequest::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, opcode }),
+                        request: Box::new(req),
+                    }));
+            }
+            OpCodes::SetAcl => {
+                let req = SetAclRequest::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, opcode }),
+                        request: Box::new(req),
+                    }));
+            }
             OpCodes::Sync => {}
             OpCodes::Check => {}
             OpCodes::Multi => {}
