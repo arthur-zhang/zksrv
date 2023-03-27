@@ -1,17 +1,15 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use bytes::{BufMut, BytesMut};
+
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
+use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::codec::{ClientPacketCodec, ReplyHeader, Request, ResponsePacket, ServerPacketCodec, ZkResponse};
 use crate::constants::OpCodes;
 use crate::errors::ZkError;
-use crate::record::Record;
 
 // c->p->b
 pub struct UpStreamConnection {
