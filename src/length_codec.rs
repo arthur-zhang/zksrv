@@ -543,10 +543,10 @@ impl LengthDelimitedCodec {
 }
 
 impl Decoder for LengthDelimitedCodec {
-    type Item = BytesMut;
+    type Item = (BytesMut, usize);
     type Error = io::Error;
 
-    fn decode(&mut self, src: &mut BytesMut) -> io::Result<Option<BytesMut>> {
+    fn decode(&mut self, src: &mut BytesMut) -> io::Result<Option<(BytesMut, usize)>> {
         let n = match self.state {
             DecodeState::Head => match self.decode_head(src)? {
                 Some(n) => {
@@ -566,7 +566,7 @@ impl Decoder for LengthDelimitedCodec {
                 // Make sure the buffer has enough space to read the next head
                 src.reserve(self.builder.num_head_bytes().saturating_sub(src.len()));
 
-                Ok(Some(data))
+                Ok(Some((data, n)))
             }
             None => Ok(None),
         }

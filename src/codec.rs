@@ -1,16 +1,15 @@
-use std::collections::HashMap;
-use std::os::macos::raw::stat;
 use std::sync::Arc;
 use bytes::{Buf, BufMut, BytesMut};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
+use log::debug;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
-use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
-use tracing::debug;
+use tokio_util::codec::{Decoder, Encoder};
 
 use crate::constants::*;
 use crate::errors::ZkError;
+use crate::length_codec::LengthDelimitedCodec;
 use crate::record::{Deserialize, Record};
 
 #[derive(Debug)]
@@ -938,7 +937,7 @@ impl Decoder for ClientPacketCodec {
         debug!("decode: {:?}", src);
         match src {
             None => { return Ok(None); }
-            Some(mut src) => {
+            Some((mut src, n)) => {
                 let xid = src.get_i32();
                 let xid_enum = XidCodes::from_i32(xid);
 
@@ -1072,8 +1071,11 @@ impl ServerPacketCodec {
         }
     }
 
-    fn decode_inner(src: &mut bytes::BytesMut) -> Result<Option<RequestPacket>, ZkError> {
-        debug!("zookeeper_proxy: decoding inner, len: {}", src.len());
+    fn decode_inner(&self, src: &mut bytes::BytesMut, len: usize) -> Result<Option<RequestPacket>, ZkError> {
+        debug!("zookeeper_proxy: decoding inner, len: {}", len);
+
+        ensure_min_length(len as i32, XID_LENGTH + INT_LENGTH)?; // xid + opcode
+
         let xid = src.get_i32();
         let xid_enum = XidCodes::from_i32(xid);
 
@@ -1242,8 +1244,8 @@ impl Decoder for ServerPacketCodec {
                     None => {
                         Ok(None)
                     }
-                    Some(mut src) => {
-                        Self::decode_inner(&mut src)
+                    Some((mut src, n)) => {
+                        self.decode_inner(&mut src, n)
                     }
                 }
             }
