@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+use std::sync::Arc;
 use bytes::{BufMut, BytesMut};
+use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -6,6 +9,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
 
 use crate::codec::{ClientPacketCodec, ReplyHeader, Request, ResponsePacket, ServerPacketCodec, ZkResponse};
+use crate::constants::OpCodes;
 use crate::errors::ZkError;
 use crate::record::Record;
 
@@ -14,27 +18,27 @@ pub struct UpStreamConnection {
     c2p_read_half: OwnedReadHalf,
     p2b_write_half: OwnedWriteHalf,
 
-    tx: UnboundedSender<BytesMut>,
+    tx: UnboundedSender<ResponsePacket>,
 }
 
 // c<-p<-b
 pub struct DownStreamConnection {
     b2p_read_half: OwnedReadHalf,
     p2c_write_half: OwnedWriteHalf,
-    rx: UnboundedReceiver<BytesMut>,
-    tx: UnboundedSender<BytesMut>,
+    rx: UnboundedReceiver<ResponsePacket>,
+    tx: UnboundedSender<ResponsePacket>,
 }
 
 impl UpStreamConnection {
-    fn new(c2p_read_half: OwnedReadHalf, p2b_write_half: OwnedWriteHalf, tx: UnboundedSender<BytesMut>) -> Self {
+    fn new(c2p_read_half: OwnedReadHalf, p2b_write_half: OwnedWriteHalf, tx: UnboundedSender<ResponsePacket>) -> Self {
         return Self { c2p_read_half, p2b_write_half, tx };
     }
 
-    async fn pipe(&mut self) -> std::io::Result<()> {
+    async fn pipe(&mut self, map: Arc<DashMap<i32, OpCodes>>) -> std::io::Result<()> {
         let mut c2p_framed
             = FramedRead::new(&mut self.c2p_read_half, ServerPacketCodec::new());
         let mut p2b_framed
-            = FramedWrite::new(&mut self.p2b_write_half, ClientPacketCodec::new());
+            = FramedWrite::new(&mut self.p2b_write_half, ClientPacketCodec::new(map.clone()));
 
         while let Some(Ok(r)) = FramedRead::next(&mut c2p_framed).await {
             println!("c->p: {:?}", r);
@@ -45,9 +49,7 @@ impl UpStreamConnection {
                         response_header: Some(ReplyHeader { xid: r.request_header.as_ref().unwrap().xid, zxid: 0, err: -102 }),
                         response: ZkResponse::Ping,
                     };
-                    let mut bytes_mut = BytesMut::new();
-                    resp.serialize_into(&mut bytes_mut).unwrap();
-                    let _ = self.tx.send(bytes_mut);
+                    let _ = self.tx.send(resp);
                     continue;
                 }
             }
@@ -58,13 +60,13 @@ impl UpStreamConnection {
 }
 
 impl DownStreamConnection {
-    fn new(b2p_read_half: OwnedReadHalf, p2c_write_half: OwnedWriteHalf, tx: UnboundedSender<BytesMut>, rx: UnboundedReceiver<BytesMut>) -> Self {
+    fn new(b2p_read_half: OwnedReadHalf, p2c_write_half: OwnedWriteHalf, tx: UnboundedSender<ResponsePacket>, rx: UnboundedReceiver<ResponsePacket>) -> Self {
         return Self { b2p_read_half, p2c_write_half, tx, rx };
     }
-    async fn pipe(&mut self) -> std::io::Result<u64> {
-        let mut framed_reader = FramedRead::new(&mut self.b2p_read_half, BytesCodec::new());
+    async fn pipe(&mut self, map: Arc<DashMap<i32, OpCodes>>) -> std::io::Result<u64> {
+        let mut framed_reader = FramedRead::new(&mut self.b2p_read_half, ClientPacketCodec::new(map.clone()));
         let tx = self.tx.clone();
-        let mut writer = FramedWrite::new(&mut self.p2c_write_half, BytesCodec::new());
+        let mut writer = FramedWrite::new(&mut self.p2c_write_half, ServerPacketCodec::new());
         loop {
             tokio::select! {
                 Some(Ok(res)) = framed_reader.next()=>{
@@ -96,11 +98,12 @@ impl ZkServer {
         let mut upstream_conn = UpStreamConnection::new(c2p_read_half, p2b_write_half, tx.clone());
         let mut downstream_conn = DownStreamConnection::new(b2p_read_half, p2c_write_half, tx.clone(), rx);
 
+        let map = Arc::new(DashMap::new());
         tokio::select! {
-            _ = upstream_conn.pipe() => {
+            _ = upstream_conn.pipe(map.clone()) => {
                 println!("upstream_conn.pipe() done");
             }
-            _ = downstream_conn.pipe() => {
+            _ = downstream_conn.pipe(map.clone()) => {
                 println!("downstream_conn.pipe() done");
             }
         }

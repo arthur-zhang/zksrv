@@ -1,4 +1,8 @@
+use std::collections::HashMap;
+use std::os::macos::raw::stat;
+use std::sync::Arc;
 use bytes::{Buf, BufMut, BytesMut};
+use dashmap::DashMap;
 use lazy_static::lazy_static;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
@@ -114,6 +118,21 @@ pub struct Acl {
     pub perms: i32,
     pub scheme: Vec<u8>,
     pub cred: Vec<u8>,
+}
+
+impl Record for Acl {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.perms);
+        buffer.put_i32(self.scheme.len() as i32);
+        buffer.extend_from_slice(&self.scheme);
+        buffer.put_i32(self.cred.len() as i32);
+        buffer.extend_from_slice(&self.cred);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + 4 + self.scheme.len() + 4 + self.cred.len()
+    }
 }
 
 #[derive(Debug)]
@@ -497,7 +516,6 @@ impl Record for Request {
 #[derive(Debug)]
 pub struct RequestPacket {
     pub request_header: Option<RequestHeader>,
-    // pub request: Box<dyn Record>,
     pub request: Request,
 }
 
@@ -557,18 +575,64 @@ impl Record for ResponsePacket {
 pub enum ZkResponse {
     Connect(ConnectResponse),
     GetData(GetDataResponse),
+    GetChildren2 {
+        children: Vec<String>,
+        stat: Stat,
+    },
+    GetAcl {
+        acl: Vec<Acl>,
+        stat: Stat,
+    },
     Ping,
+    Stat(Stat),
+    Empty,
+    Strings(Vec<String>),
+    String(String),
+    Multi(Vec<Result<ZkResponse, ZkError>>),
 }
 
 
 impl Record for ZkResponse {
     fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
         match self {
-            ZkResponse::Connect(resp) => {}
+            ZkResponse::Connect(resp) => {
+                resp.serialize_into(buffer)?;
+            }
             ZkResponse::GetData(r) => {
                 r.serialize_into(buffer)?;
             }
             ZkResponse::Ping => {}
+            ZkResponse::GetAcl { acl, stat } => {
+                buffer.put_i32(acl.len() as i32);
+                for a in acl {
+                    a.serialize_into(buffer)?;
+                }
+                stat.serialize_into(buffer)?;
+            }
+            ZkResponse::Stat(stat) => {
+                stat.serialize_into(buffer)?;
+            }
+            ZkResponse::Empty => {}
+            ZkResponse::Strings(strs) => {
+                buffer.put_i32(strs.len() as i32);
+                for s in strs {
+                    buffer.put_i32(s.len() as i32);
+                    buffer.put_slice(s.as_bytes());
+                }
+            }
+            ZkResponse::String(str) => {
+                buffer.put_i32(str.len() as i32);
+                buffer.put_slice(str.as_bytes());
+            }
+            ZkResponse::Multi(_) => { todo!() }
+            ZkResponse::GetChildren2 { children, stat } => {
+                buffer.put_i32(children.len() as i32);
+                for s in children {
+                    buffer.put_i32(s.len() as i32);
+                    buffer.put_slice(s.as_bytes());
+                }
+                stat.serialize_into(buffer)?;
+            }
         }
         Ok(())
     }
@@ -583,6 +647,23 @@ impl Record for ZkResponse {
             }
             ZkResponse::Ping => {
                 0
+            }
+            ZkResponse::GetAcl { acl, stat } => {
+                4 + acl.len() * 8 + stat.size()
+            }
+            ZkResponse::Stat(stat) => {
+                stat.size()
+            }
+            ZkResponse::Empty => { 0 }
+            ZkResponse::Strings(strs) => {
+                4 + strs.iter().map(|s| 4 + s.len()).sum::<usize>()
+            }
+            ZkResponse::String(str) => {
+                4 + str.len()
+            }
+            ZkResponse::Multi(_) => { todo!() }
+            ZkResponse::GetChildren2 { children, stat } => {
+                4 + children.iter().map(|s| 4 + s.len()).sum::<usize>() + stat.size()
             }
         }
     }
@@ -663,9 +744,7 @@ impl Deserialize for ConnectResponse {
 }
 
 #[derive(Debug)]
-pub struct GetDataResponse {
-    pub data: Vec<u8>,
-
+pub struct Stat {
     pub czxid: i64,
     /// The last transaction that modified the znode.
     pub mzxid: i64,
@@ -687,14 +766,10 @@ pub struct GetDataResponse {
     pub num_children: i32,
     /// The transaction ID that last modified the children of the znode.
     pub pzxid: i64,
-
 }
 
-impl Record for GetDataResponse {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.data.len() as i32);
-        buffer.extend_from_slice(&self.data);
-
+impl Record for Stat {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
         buffer.put_i64(self.czxid);
         buffer.put_i64(self.mzxid);
         buffer.put_i64(self.ctime);
@@ -710,7 +785,48 @@ impl Record for GetDataResponse {
     }
 
     fn size(&self) -> usize {
-        4 + self.data.len() + 6 * 8 + 4 * 5
+        6 * 8 + 4 * 5
+    }
+}
+
+
+impl Deserialize for Stat {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        Ok(Self {
+            czxid: bytes.get_i64(),
+            mzxid: bytes.get_i64(),
+            ctime: bytes.get_i64(),
+            mtime: bytes.get_i64(),
+            version: bytes.get_i32(),
+            cversion: bytes.get_i32(),
+            aversion: bytes.get_i32(),
+            ephemeral_owner: bytes.get_i64(),
+            data_length: bytes.get_i32(),
+            num_children: bytes.get_i32(),
+            pzxid: bytes.get_i64(),
+        })
+    }
+}
+
+
+#[derive(Debug)]
+pub struct GetDataResponse {
+    pub data: Vec<u8>,
+    stat: Stat,
+}
+
+impl Record for GetDataResponse {
+    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.data.len() as i32);
+        buffer.extend_from_slice(&self.data);
+
+        self.stat.serialize_into(buffer)?;
+
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.data.len() + self.stat.size()
     }
 }
 
@@ -736,11 +852,12 @@ lazy_static! {
 
 pub struct ClientPacketCodec {
     inner: LengthDelimitedCodec,
+    requests_by_xid: Arc<DashMap<i32, OpCodes>>,
 }
 
 impl ClientPacketCodec {
-    pub fn new() -> Self {
-        Self { inner: LENGTH_DELIMITED_CODEC.clone() }
+    pub fn new(map: Arc<DashMap<i32, OpCodes>>) -> Self {
+        Self { inner: LENGTH_DELIMITED_CODEC.clone(), requests_by_xid: map }
     }
 }
 
@@ -748,6 +865,13 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
     type Error = ZkError;
 
     fn encode(&mut self, item: RequestPacket, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        if let Some(header) = &item.request_header {
+            let xid = header.xid;
+            let op = header.opcode;
+            self.requests_by_xid.insert(xid, OpCodes::from_i32(op).ok_or(ZkError::EncodeError)?);
+            println!("encode insert xid map :{:?} {:?}", xid, op);
+        }
+
         let n = item.size();
         dst.reserve(n + 4);
         dst.put_i32(n as i32);
@@ -757,21 +881,27 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
 }
 
 impl Decoder for ClientPacketCodec {
-    type Item = ZkResponse;
+    type Item = ResponsePacket;
     type Error = ZkError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        let res = self.inner.decode(src).map_err(|_| ZkError::DecodeError)?;
+        let src = self.inner.decode(src).map_err(|_| ZkError::DecodeError)?;
 
-        match res {
+        println!("decode: {:?}", src);
+        match src {
             None => { return Ok(None); }
-            Some(mut res) => {
+            Some(mut src) => {
                 let xid = src.get_i32();
-                let xid_enum = XidCodes::from_i32(xid).ok_or(ZkError::DecodeError)?;
-                if let XidCodes::ConnectXid = xid_enum {
-                    let resp = ConnectResponse::deserialize(&mut res)?;
-                    return Ok(Some(ZkResponse::Connect(resp)));
+                let xid_enum = XidCodes::from_i32(xid);
+
+                if let Some(XidCodes::ConnectXid) = xid_enum {
+                    let resp = ConnectResponse::deserialize(&mut src)?;
+                    return Ok(Some(ResponsePacket {
+                        response_header: None,
+                        response: ZkResponse::Connect(resp),
+                    }));
                 }
+                println!(">>>>>>>>..xid: {}", xid);
                 let zxid = src.get_i64();
                 let err = src.get_i32();
                 let reply_header = ReplyHeader {
@@ -779,12 +909,107 @@ impl Decoder for ClientPacketCodec {
                     zxid,
                     err,
                 };
-                match xid_enum {
-                    XidCodes::ConnectXid => { unreachable!() }
-                    XidCodes::WatchXid => {}
-                    XidCodes::PingXid => {}
-                    XidCodes::AuthXid => {}
-                    XidCodes::SetWatchesXid => {}
+
+                if xid_enum.is_some() {
+                    match xid_enum.unwrap() {
+                        XidCodes::ConnectXid => { unreachable!() }
+                        XidCodes::WatchXid => {}
+                        XidCodes::PingXid => {
+                            return Ok(Some(ResponsePacket {
+                                response_header: Some(reply_header),
+                                response: ZkResponse::Ping,
+                            }));
+                        }
+                        XidCodes::AuthXid => {}
+                        XidCodes::SetWatchesXid => {}
+                    }
+                }
+                println!("before: >>>>>>>>>>>>>>>>>>>>>>{:?},len:{}", xid, self.requests_by_xid.len());
+                // for x in &self.requests_by_xid {
+                //     println!(">>>>>>>.{:?}:{:?}", x.0, x.1);
+                // }
+                let opcode = self.requests_by_xid.get(&xid).ok_or(ZkError::DecodeError)?;
+                let opcode = opcode.value().clone();
+                println!("after   >>>>>>>>>>>>>>>>>>>>>>{:?}", opcode);
+
+                match opcode {
+                    OpCodes::Connect => {}
+
+                    OpCodes::Exists | OpCodes::SetData | OpCodes::SetAcl => {
+                        let stat = Stat::deserialize(&mut src)?;
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::Stat(stat),
+                        }));
+                    }
+                    OpCodes::GetData => {
+                        let data = get_data(&mut src)?;
+                        let stat = Stat::deserialize(&mut src)?;
+                        println!(">>>>>>>>>>>>getdata>>>>>>>>>>{:?}", data);
+                        println!(">>>>>>>>>>>>getdata>>>>>>>>>>{:?}", stat);
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::GetData(GetDataResponse { data, stat }),
+                        }));
+                    }
+
+                    OpCodes::Delete => {
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::Empty,
+                        }));
+                    }
+                    OpCodes::GetChildren => {
+                        let children = get_str_vec(&mut src)?;
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::Strings(children),
+                        }));
+                    }
+                    OpCodes::Create => {
+                        let path = get_str(&mut src)?;
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::String(path),
+                        }));
+                    }
+                    OpCodes::GetAcl => {
+                        let acl = get_acl(&mut src)?;
+                        let stat = Stat::deserialize(&mut src)?;
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::GetAcl { acl, stat },
+                        }));
+                    }
+                    OpCodes::Check => {
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::Empty,
+                        }));
+                    }
+                    OpCodes::Sync => {}
+                    OpCodes::Ping => {}
+                    OpCodes::GetChildren2 => {
+                        let children = get_str_vec(&mut src)?;
+                        let stat = Stat::deserialize(&mut src)?;
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::GetChildren2 { children, stat },
+                        }));
+                    }
+                    OpCodes::Multi => {}
+                    OpCodes::Create2 => {}
+                    OpCodes::Reconfig => {}
+                    OpCodes::CheckWatches => {}
+                    OpCodes::RemoveWatches => {}
+                    OpCodes::CreateContainer => {}
+                    OpCodes::CreateTtl => {}
+                    OpCodes::Close => {}
+                    OpCodes::SetAuth => {}
+                    OpCodes::SetWatches => {}
+                    OpCodes::GetEphemerals => {}
+                    OpCodes::GetAllChildrenNumber => {}
+                    OpCodes::SetWatches2 => {}
                 }
             }
         }
@@ -960,14 +1185,14 @@ impl Decoder for ServerPacketCodec {
     }
 }
 
-impl Encoder<ZkResponse> for ServerPacketCodec {
+impl Encoder<ResponsePacket> for ServerPacketCodec {
     type Error = ZkError;
 
-    fn encode(&mut self, item: ZkResponse, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, item: ResponsePacket, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let mut buf = BytesMut::new();
         buf.reserve(item.size());
         item.serialize_into(&mut buf)?;
-        self.inner.encode(buf.freeze(), dst).map_err(|e| ZkError::EncodeError)
+        self.inner.encode(buf.freeze(), dst).map_err(|_| ZkError::EncodeError)
     }
 }
 

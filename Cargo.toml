@@ -16,3 +16,4 @@ tokio-util = { version = "0.7.7", features = ["codec"] }
 num-derive = "0.3"
 num-traits = "0.2"
 lazy_static = "1.4.0"
+dashmap = "5.4.0"
