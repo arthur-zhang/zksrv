@@ -58,31 +58,49 @@ impl UpStreamConnection {
     }
 }
 
-impl DownStreamConnection {
-    fn new(b2p_read_half: OwnedReadHalf, p2c_write_half: OwnedWriteHalf, tx: UnboundedSender<ResponsePacket>, rx: UnboundedReceiver<ResponsePacket>) -> Self {
-        return Self { b2p_read_half, p2c_write_half, tx, rx };
-    }
-    async fn pipe(&mut self, map: Arc<DashMap<i32, OpCodes>>) -> std::io::Result<u64> {
-        let mut framed_reader = FramedRead::new(&mut self.b2p_read_half, ClientPacketCodec::new(map.clone()));
-        let tx = self.tx.clone();
-        let mut writer = FramedWrite::new(&mut self.p2c_write_half, ServerPacketCodec::new());
-        loop {
-            tokio::select! {
-                Some(Ok(res)) = framed_reader.next()=>{
-                    tx.send(res);
-                }
-                Some(res) = self.rx.recv() => {
-                    println!("p->c: {:?}", res);
 
-                    let xid = res.response_header.as_ref().and_then(|it| Some(it.xid)).clone();
-                    let _ = writer.send(res).await;
-                    if let Some(xid) = xid {
-                        map.remove(&xid);
-                    }
-                }
+// c<-p
+struct P2CDownStreamConnection {
+    p2c_write_half: OwnedWriteHalf,
+    rx: UnboundedReceiver<ResponsePacket>,
+}
+
+impl P2CDownStreamConnection {
+    fn new(p2c_write_half: OwnedWriteHalf, rx: UnboundedReceiver<ResponsePacket>) -> Self {
+        return Self { p2c_write_half, rx };
+    }
+    async fn pipe(&mut self, map: Arc<DashMap<i32, OpCodes>>) -> std::io::Result<()> {
+        let mut writer = FramedWrite::new(&mut self.p2c_write_half, ServerPacketCodec::new());
+
+        while let Some(res) = self.rx.recv().await {
+            println!("p->c: {:?}", res);
+            let xid = res.response_header.as_ref().and_then(|it| Some(it.xid)).clone();
+            let _ = writer.send(res).await;
+            if let Some(xid) = xid {
+                map.remove(&xid);
             }
         }
-        Ok(0)
+        Ok(())
+    }
+}
+
+
+pub struct B2PDownStreamConnection {
+    b2p_read_half: OwnedReadHalf,
+    tx: UnboundedSender<ResponsePacket>,
+}
+
+impl B2PDownStreamConnection {
+    fn new(b2p_read_half: OwnedReadHalf, tx: UnboundedSender<ResponsePacket>) -> Self {
+        return Self { b2p_read_half, tx };
+    }
+    async fn pipe(&mut self, map: Arc<DashMap<i32, OpCodes>>) -> std::io::Result<()> {
+        let mut framed_reader = FramedRead::new(&mut self.b2p_read_half, ClientPacketCodec::new(map.clone()));
+
+        while let Some(Ok(res)) = framed_reader.next().await {
+            let _ = self.tx.send(res);
+        }
+        Ok(())
     }
 }
 
@@ -98,16 +116,20 @@ impl ZkServer {
         let (c2p_read_half, p2c_write_half) = c2p_stream.into_split();
         let (b2p_read_half, p2b_write_half) = p2b_stream.into_split();
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut upstream_conn = UpStreamConnection::new(c2p_read_half, p2b_write_half, tx.clone());
-        let mut downstream_conn = DownStreamConnection::new(b2p_read_half, p2c_write_half, tx.clone(), rx);
+        let mut p2c_downstream_conn = P2CDownStreamConnection::new(p2c_write_half, rx);
+        let mut b2p_downstream_conn = B2PDownStreamConnection::new(b2p_read_half, tx.clone());
 
         let map = Arc::new(DashMap::new());
         tokio::select! {
             _ = upstream_conn.pipe(map.clone()) => {
                 println!("upstream_conn.pipe() done");
             }
-            _ = downstream_conn.pipe(map.clone()) => {
+            _ = p2c_downstream_conn.pipe(map.clone()) => {
+                println!("downstream_conn.pipe() done");
+            }
+            _ = b2p_downstream_conn.pipe(map.clone()) => {
                 println!("downstream_conn.pipe() done");
             }
         }
