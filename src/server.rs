@@ -19,14 +19,6 @@ pub struct UpStreamConnection {
     tx: UnboundedSender<ResponsePacket>,
 }
 
-// c<-p<-b
-pub struct DownStreamConnection {
-    b2p_read_half: OwnedReadHalf,
-    p2c_write_half: OwnedWriteHalf,
-    rx: UnboundedReceiver<ResponsePacket>,
-    tx: UnboundedSender<ResponsePacket>,
-}
-
 impl UpStreamConnection {
     fn new(c2p_read_half: OwnedReadHalf, p2b_write_half: OwnedWriteHalf, tx: UnboundedSender<ResponsePacket>) -> Self {
         return Self { c2p_read_half, p2b_write_half, tx };

@@ -924,13 +924,8 @@ impl Decoder for ClientPacketCodec {
                         XidCodes::SetWatchesXid => {}
                     }
                 }
-                println!("before: >>>>>>>>>>>>>>>>>>>>>>{:?},len:{}", xid, self.requests_by_xid.len());
-                // for x in &self.requests_by_xid {
-                //     println!(">>>>>>>.{:?}:{:?}", x.0, x.1);
-                // }
                 let opcode = self.requests_by_xid.get(&xid).ok_or(ZkError::DecodeError)?;
                 let opcode = opcode.value().clone();
-                println!("after   >>>>>>>>>>>>>>>>>>>>>>{:?}", opcode);
 
                 match opcode {
                     OpCodes::Connect => {}
@@ -945,8 +940,6 @@ impl Decoder for ClientPacketCodec {
                     OpCodes::GetData => {
                         let data = get_data(&mut src)?;
                         let stat = Stat::deserialize(&mut src)?;
-                        println!(">>>>>>>>>>>>getdata>>>>>>>>>>{:?}", data);
-                        println!(">>>>>>>>>>>>getdata>>>>>>>>>>{:?}", stat);
                         return Ok(Some(ResponsePacket {
                             response_header: Some(reply_header),
                             response: ZkResponse::GetData(GetDataResponse { data, stat }),
