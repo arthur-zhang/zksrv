@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, BytesMut};
 use lazy_static::lazy_static;
 use num_derive::{FromPrimitive, ToPrimitive};
-use num_traits::FromPrimitive;
+use num_traits::{FromPrimitive, ToPrimitive};
 use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
 
 use crate::constants::*;
@@ -534,43 +534,41 @@ impl Record for RequestHeader {
 }
 
 #[derive(Debug)]
+pub struct ResponsePacket {
+    pub response_header: Option<ReplyHeader>,
+    pub response: ZkResponse,
+}
+
+impl Record for ResponsePacket {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        if let Some(header) = &self.response_header {
+            header.serialize_into(buffer)?;
+        }
+        self.response.serialize_into(buffer)?;
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        self.response_header.as_ref().map_or(0, |h| h.size()) + self.response.size()
+    }
+}
+
+#[derive(Debug)]
 pub enum ZkResponse {
     Connect(ConnectResponse),
     GetData(GetDataResponse),
-    Ping(ReplyHeader),
+    Ping,
 }
 
 
 impl Record for ZkResponse {
     fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
         match self {
-            ZkResponse::Connect(resp) => {
-                buffer.put_i32(resp.protocol_version);
-                buffer.put_i32(resp.timeout);
-                buffer.put_i64(resp.session_id);
-                buffer.put_i32(resp.passwd.len() as i32);
-                buffer.extend_from_slice(&resp.passwd);
-                buffer.put_i8(resp.read_only as i8);
-            }
+            ZkResponse::Connect(resp) => {}
             ZkResponse::GetData(r) => {
-                r.reply_header.serialize_into(buffer)?;
-                buffer.put_i32(r.data.len() as i32);
-                buffer.extend_from_slice(&r.data);
-                buffer.put_i64(r.czxid);
-                buffer.put_i64(r.mzxid);
-                buffer.put_i64(r.ctime);
-                buffer.put_i64(r.mtime);
-                buffer.put_i32(r.version);
-                buffer.put_i32(r.cversion);
-                buffer.put_i32(r.aversion);
-                buffer.put_i64(r.ephemeral_owner);
-                buffer.put_i32(r.data_length);
-                buffer.put_i32(r.num_children);
-                buffer.put_i64(r.pzxid);
+                r.serialize_into(buffer)?;
             }
-            ZkResponse::Ping(resp) => {
-                resp.serialize_into(buffer)?;
-            }
+            ZkResponse::Ping => {}
         }
         Ok(())
     }
@@ -581,10 +579,10 @@ impl Record for ZkResponse {
                 4 + 4 + 8 + 4 + r.passwd.len() + 1
             }
             ZkResponse::GetData(r) => {
-                r.reply_header.size() + 4 + r.data.len() + 6 * 8 + 4 * 5
+                4 + r.data.len() + 6 * 8 + 4 * 5
             }
-            ZkResponse::Ping(r) => {
-                r.size()
+            ZkResponse::Ping => {
+                0
             }
         }
     }
@@ -619,9 +617,53 @@ pub struct ConnectResponse {
     pub read_only: bool,
 }
 
+impl Record for ConnectResponse {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        buffer.put_i32(self.protocol_version);
+        buffer.put_i32(self.timeout);
+        buffer.put_i64(self.session_id);
+        buffer.put_i32(self.passwd.len() as i32);
+        buffer.extend_from_slice(&self.passwd);
+        buffer.put_i8(self.read_only as i8);
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + 4 + 8 + 4 + self.passwd.len() + 1
+    }
+}
+
+impl Deserialize for ConnectResponse {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        // let protocol_version = bytes.get_i32();
+        let timeout = bytes.get_i32();
+        let session_id = bytes.get_i64();
+        let passwd_len = bytes.get_i32();
+        let passwd = if passwd_len > 0 {
+            let mut vec = vec![0; passwd_len as usize];
+            bytes.copy_to_slice(&mut vec);
+            vec
+        } else {
+            vec![]
+        };
+        let read_only = if bytes.len() > 0 {
+            bytes.get_u8() == 1
+        } else {
+            false
+        };
+        Ok(Self {
+            // protocol_version,
+            protocol_version: 0,
+            timeout,
+            session_id,
+            passwd,
+            read_only,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct GetDataResponse {
-    pub reply_header: ReplyHeader,
     pub data: Vec<u8>,
 
     pub czxid: i64,
@@ -648,9 +690,8 @@ pub struct GetDataResponse {
 
 }
 
-impl GetDataResponse {
+impl Record for GetDataResponse {
     fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        self.reply_header.serialize_into(buffer)?;
         buffer.put_i32(self.data.len() as i32);
         buffer.extend_from_slice(&self.data);
 
@@ -666,6 +707,10 @@ impl GetDataResponse {
         buffer.put_i32(self.num_children);
         buffer.put_i64(self.pzxid);
         Ok(())
+    }
+
+    fn size(&self) -> usize {
+        4 + self.data.len() + 6 * 8 + 4 * 5
     }
 }
 
@@ -689,11 +734,13 @@ lazy_static! {
         .new_codec();
 }
 
-pub struct ClientPacketCodec {}
+pub struct ClientPacketCodec {
+    inner: LengthDelimitedCodec,
+}
 
 impl ClientPacketCodec {
     pub fn new() -> Self {
-        Self {}
+        Self { inner: LENGTH_DELIMITED_CODEC.clone() }
     }
 }
 
@@ -708,6 +755,45 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
         Ok(())
     }
 }
+
+impl Decoder for ClientPacketCodec {
+    type Item = ZkResponse;
+    type Error = ZkError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        let res = self.inner.decode(src).map_err(|_| ZkError::DecodeError)?;
+
+        match res {
+            None => { return Ok(None); }
+            Some(mut res) => {
+                let xid = src.get_i32();
+                let xid_enum = XidCodes::from_i32(xid).ok_or(ZkError::DecodeError)?;
+                if let XidCodes::ConnectXid = xid_enum {
+                    let resp = ConnectResponse::deserialize(&mut res)?;
+                    return Ok(Some(ZkResponse::Connect(resp)));
+                }
+                let zxid = src.get_i64();
+                let err = src.get_i32();
+                let reply_header = ReplyHeader {
+                    xid,
+                    zxid,
+                    err,
+                };
+                match xid_enum {
+                    XidCodes::ConnectXid => { unreachable!() }
+                    XidCodes::WatchXid => {}
+                    XidCodes::PingXid => {}
+                    XidCodes::AuthXid => {}
+                    XidCodes::SetWatchesXid => {}
+                }
+            }
+        }
+
+
+        Ok(None)
+    }
+}
+
 
 pub struct ServerPacketCodec {
     inner: LengthDelimitedCodec,

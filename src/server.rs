@@ -5,7 +5,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
 
-use crate::codec::{ClientPacketCodec, ReplyHeader, Request, ServerPacketCodec, ZkResponse};
+use crate::codec::{ClientPacketCodec, ReplyHeader, Request, ResponsePacket, ServerPacketCodec, ZkResponse};
 use crate::errors::ZkError;
 use crate::record::Record;
 
@@ -41,10 +41,11 @@ impl UpStreamConnection {
             if let Request::GetChildren(req) = &r.request {
                 if req.path == "/".to_string() {
                     println!("get children of root");
-                    let resp = ZkResponse::Ping(ReplyHeader { xid: r.request_header.as_ref().unwrap().xid, zxid: 0, err: -102 });
+                    let resp = ResponsePacket {
+                        response_header: Some(ReplyHeader { xid: r.request_header.as_ref().unwrap().xid, zxid: 0, err: -102 }),
+                        response: ZkResponse::Ping,
+                    };
                     let mut bytes_mut = BytesMut::new();
-                    bytes_mut.reserve(resp.size() + 4);
-                    bytes_mut.put_i32(resp.size() as i32);
                     resp.serialize_into(&mut bytes_mut).unwrap();
                     let _ = self.tx.send(bytes_mut);
                     continue;
@@ -62,7 +63,7 @@ impl DownStreamConnection {
     }
     async fn pipe(&mut self) -> std::io::Result<u64> {
         let mut framed_reader = FramedRead::new(&mut self.b2p_read_half, BytesCodec::new());
-        let mut tx = self.tx.clone();
+        let tx = self.tx.clone();
         let mut writer = FramedWrite::new(&mut self.p2c_write_half, BytesCodec::new());
         loop {
             tokio::select! {
