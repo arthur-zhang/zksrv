@@ -917,7 +917,7 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
             let xid = header.xid;
             let op = header.opcode;
             self.requests_by_xid.insert(xid, OpCodes::from_i32(op).ok_or(ZkError::EncodeError)?);
-            println!("encode insert xid map :{:?} {:?}", xid, op);
+            debug!("encode insert xid map :{:?} {:?}", xid, op);
         }
 
         let n = item.size();
@@ -935,7 +935,7 @@ impl Decoder for ClientPacketCodec {
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let src = self.inner.decode(src).map_err(|_| ZkError::DecodeError)?;
 
-        println!("decode: {:?}", src);
+        debug!("decode: {:?}", src);
         match src {
             None => { return Ok(None); }
             Some(mut src) => {
@@ -949,7 +949,7 @@ impl Decoder for ClientPacketCodec {
                         response: ZkResponse::Connect(resp),
                     }));
                 }
-                println!(">>>>>>>>..xid: {}", xid);
+                debug!(">>>>>>>>..xid: {}", xid);
                 let zxid = src.get_i64();
                 let err = src.get_i32();
                 let reply_header = ReplyHeader {
@@ -1073,11 +1073,20 @@ impl ServerPacketCodec {
     }
 
     fn decode_inner(src: &mut bytes::BytesMut) -> Result<Option<RequestPacket>, ZkError> {
+        debug!("zookeeper_proxy: decoding inner, len: {}", src.len());
         let xid = src.get_i32();
         let xid_enum = XidCodes::from_i32(xid);
 
-        debug!("xid:{} xid: {:?}", xid, xid_enum);
         // Control requests, with XIDs <= 0.
+        // These are meant to control the state of a session:
+        // connect, keep-alive, authenticate and set initial watches.
+        //
+        // Note: setWatches is a command historically used to set watches
+        //       right after connecting, typically used when roaming from one
+        //       ZooKeeper server to the next. Thus, the special xid.
+        //       However, some client implementations might expose setWatches
+        //       as a regular data request, so we support that as well.
+
         if let Some(xid_enum) = xid_enum {
             match xid_enum {
                 XidCodes::ConnectXid => {
@@ -1121,7 +1130,7 @@ impl ServerPacketCodec {
         // Data requests, with XIDs > 0.
         let opcode = src.get_i32();
         let opcode_enum = OpCodes::from_i32(opcode).unwrap();
-        println!("opcode_enum: {:?}", opcode_enum);
+        debug!("opcode_enum: {:?}", opcode_enum);
         match opcode_enum {
             OpCodes::GetData => {
                 let req = GetDataRequest::deserialize(src)?;
@@ -1292,7 +1301,7 @@ fn get_acl(bytes: &mut bytes::BytesMut) -> Result<Vec<Acl>, ZkError> {
 
 fn get_data(bytes: &mut bytes::BytesMut) -> Result<Vec<u8>, ZkError> {
     let len = bytes.get_i32();
-    println!("get data: len: {}", len);
+    debug!("get data: len: {}", len);
     if len <= 0 {
         return Ok(vec![]);
     }
