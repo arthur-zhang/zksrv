@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::sync::Arc;
 use bytes::{Buf, BufMut, BytesMut};
 use dashmap::DashMap;
@@ -64,21 +65,13 @@ impl Deserialize for AuthRequest {
 }
 
 
-impl ConnectRequest {}
-
 impl Deserialize for ConnectRequest {
     fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
+        ensure_min_length_bytes(bytes, ZXID_LENGTH + TIMEOUT_LENGTH + SESSION_LENGTH + INT_LENGTH)?;
         let last_zxid_seen = bytes.get_i64();
         let timeout = bytes.get_i32();
         let session_id = bytes.get_i64();
-        let passwd_len = bytes.get_i32();
-        let passwd = if passwd_len > 0 {
-            let mut passwd = vec![0; passwd_len as usize];
-            bytes.copy_to_slice(&mut passwd);
-            passwd
-        } else {
-            vec![]
-        };
+        let passwd = get_data(bytes)?;
         let read_only = maybe_read_bool(bytes);
         Ok(ConnectRequest {
             protocol_version: 0,
@@ -481,6 +474,8 @@ impl Record for SetWatchesRequest {
 
 impl Deserialize for SetWatchesRequest {
     fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        ensure_min_length_bytes(bytes, ZXID_LENGTH + INT_LENGTH * 3)?;
+        //todo
         let relative_zxid = bytes.get_i64();
         let data_watches = get_str_vec(bytes)?;
         let exist_watches = get_str_vec(bytes)?;
@@ -1072,12 +1067,9 @@ impl ServerPacketCodec {
     }
 
     fn decode_inner(&self, src: &mut bytes::BytesMut, len: usize) -> Result<Option<RequestPacket>, ZkError> {
+        let len = src.len() as i32;
         debug!("zookeeper_proxy: decoding inner, len: {}", len);
-
-        ensure_min_length(len as i32, XID_LENGTH + INT_LENGTH)?; // xid + opcode
-
-        let xid = src.get_i32();
-        let xid_enum = XidCodes::from_i32(xid);
+        ensure_min_length_bytes(src, XID_LENGTH + OPCODE_LENGTH)?; // xid + opcode
 
         // Control requests, with XIDs <= 0.
         // These are meant to control the state of a session:
@@ -1089,14 +1081,14 @@ impl ServerPacketCodec {
         //       However, some client implementations might expose setWatches
         //       as a regular data request, so we support that as well.
 
+        let xid = src.get_i32();
+        let xid_enum = XidCodes::from_i32(xid);
         if let Some(xid_enum) = xid_enum {
             match xid_enum {
                 XidCodes::ConnectXid => {
                     let req = ConnectRequest::deserialize(src)?;
-                    debug!("connect req: {:?}", req);
                     return Ok(Some(RequestPacket {
                         request_header: None,
-                        // request: Box::new(req),
                         request: Request::Connect(req),
                     }));
                 }
@@ -1271,6 +1263,17 @@ fn ensure_min_length(len: i32, min: i32) -> Result<(), ZkError> {
     Ok(())
 }
 
+fn ensure_min_length_bytes(bytes: &bytes::BytesMut, min: i32) -> Result<(), ZkError> {
+    return ensure_min_length(bytes.len() as i32, min);
+}
+
+fn ensure_max_length_bytes(bytes: &bytes::BytesMut) -> Result<(), ZkError> {
+    // if len > MAX_PACKET_LENGTH {
+    //     return Err(ZkError::InvalidPacketLength(len));
+    // }
+    Ok(())
+}
+
 fn ensure_max_len(len: usize) -> Result<(), ZkError> {
     // if len > MAX_PACKET_LENGTH {
     //     return Err(ZkError::InvalidPacketLength(len));
@@ -1303,14 +1306,11 @@ fn get_acl(bytes: &mut bytes::BytesMut) -> Result<Vec<Acl>, ZkError> {
 
 fn get_data(bytes: &mut bytes::BytesMut) -> Result<Vec<u8>, ZkError> {
     let len = bytes.get_i32();
-    debug!("get data: len: {}", len);
     if len <= 0 {
         return Ok(vec![]);
     }
-    if bytes.len() < len as usize {
-        return Err(ZkError::InvalidPacketLength(len));
-    }
-    ensure_max_len(len as usize)?;
+    ensure_min_length_bytes(bytes, len)?;
+    ensure_max_length_bytes(bytes)?;
     let mut vec = vec![0; len as usize];
     bytes.copy_to_slice(&mut vec);
     Ok(vec)
