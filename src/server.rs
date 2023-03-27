@@ -42,11 +42,12 @@ impl UpStreamConnection {
 
         while let Some(Ok(r)) = FramedRead::next(&mut c2p_framed).await {
             println!("c->p: {:?}", r);
+            let xid = r.request_header.as_ref().and_then(|it| Some(it.xid)).clone();
             if let Request::GetChildren(req) = &r.request {
                 if req.path == "/".to_string() {
                     println!("get children of root");
                     let resp = ResponsePacket {
-                        response_header: Some(ReplyHeader { xid: r.request_header.as_ref().unwrap().xid, zxid: 0, err: -102 }),
+                        response_header: Some(ReplyHeader { xid: xid.unwrap(), zxid: 0, err: -102 }),
                         response: ZkResponse::Ping,
                     };
                     let _ = self.tx.send(resp);
@@ -74,7 +75,12 @@ impl DownStreamConnection {
                 }
                 Some(res) = self.rx.recv() => {
                     println!("p->c: {:?}", res);
-                    writer.send(res).await;
+
+                    let xid = res.response_header.as_ref().and_then(|it| Some(it.xid)).clone();
+                    let _ = writer.send(res).await;
+                    if let Some(xid) = xid {
+                        map.remove(&xid);
+                    }
                 }
             }
         }
