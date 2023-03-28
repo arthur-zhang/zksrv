@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{Cursor, IoSlice};
 use std::sync::Arc;
 use bytes::{Buf, BufMut, BytesMut};
 use dashmap::DashMap;
@@ -11,556 +11,30 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::constants::*;
 use crate::errors::ZkError;
 use crate::length_codec::LengthDelimitedCodec;
+use crate::proto::{ACL, AuthPacket, ConnectRequest, ConnectResponse, CreateRequest, CreateTTLRequest, DeleteRequest, ExistsRequest, GetACLRequest, GetChildrenRequest, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader, SetACLRequest, SetDataRequest, SetWatches, SetWatches2, Stat};
 use crate::record::{Deserialize, Serialize};
 
-#[derive(Debug)]
-pub struct ConnectRequest {
-    pub protocol_version: i32,
-    pub last_zxid_seen: i64,
-    pub timeout: i32,
-    pub session_id: i64,
-    pub passwd: Vec<u8>,
-    pub read_only: bool,
-}
-
-#[derive(Debug)]
-pub struct AuthRequest {
-    pub r#type: i32,
-    pub scheme: String,
-    pub auth: Vec<u8>,
-}
-
-impl Serialize for AuthRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.r#type);
-        buffer.put_i32(self.scheme.len() as i32);
-        buffer.put_slice(self.scheme.as_bytes());
-        buffer.put_i32(self.auth.len() as i32);
-        buffer.put_slice(&self.auth);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + 4 + self.scheme.len() + 4 + self.auth.len()
-    }
-}
-
-impl Deserialize for AuthRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let r#type = bytes.get_i32();
-        let scheme = get_str(bytes)?;
-        let auth_len = bytes.get_i32();
-        let mut auth = if auth_len > 0 {
-            vec![0; auth_len as usize]
-        } else {
-            vec![]
-        };
-        bytes.copy_to_slice(&mut auth);
-        Ok(AuthRequest {
-            r#type,
-            scheme,
-            auth,
-        })
-    }
-}
-
-
-impl Deserialize for ConnectRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        ensure_min_length_bytes(bytes, ZXID_LENGTH + TIMEOUT_LENGTH + SESSION_LENGTH + INT_LENGTH)?;
-        let last_zxid_seen = bytes.get_i64();
-        let timeout = bytes.get_i32();
-        let session_id = bytes.get_i64();
-        let passwd = get_data(bytes)?;
-        let read_only = maybe_read_bool(bytes);
-        Ok(ConnectRequest {
-            protocol_version: 0,
-            last_zxid_seen,
-            timeout,
-            session_id,
-            passwd,
-            read_only,
-        })
-    }
-}
-
-impl Serialize for ConnectRequest {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.protocol_version);
-        buffer.put_i64(self.last_zxid_seen);
-        buffer.put_i32(self.timeout);
-        buffer.put_i64(self.session_id);
-        buffer.put_i32(self.passwd.len() as i32);
-        buffer.extend_from_slice(&self.passwd);
-        buffer.put_u8(self.read_only as u8);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + 8 + 4 + 8 + 4 + self.passwd.len() + 1
-    }
-}
-
-
-#[derive(Debug)]
-pub struct PingRequest;
-
-impl Deserialize for PingRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        Ok(PingRequest {})
-    }
-}
-
-impl Serialize for PingRequest {
-    fn serialize_into(&self, _buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        Ok(())
-    }
-    fn size(&self) -> usize {
-        0
-    }
-}
-
-
-#[derive(Debug)]
-pub struct GetDataRequest {
-    pub path: String,
-    pub watch: bool,
-}
-
-impl Deserialize for GetDataRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let watch = bytes.get_u8() == 1;
-        Ok(GetDataRequest { path, watch })
-    }
-}
-
-impl Serialize for GetDataRequest {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_u8(self.watch as u8);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 1
-    }
-}
-
-#[derive(Debug)]
-pub struct Acl {
-    pub perms: i32,
-    pub scheme: Vec<u8>,
-    pub cred: Vec<u8>,
-}
-
-impl Serialize for Acl {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.perms);
-        buffer.put_i32(self.scheme.len() as i32);
-        buffer.extend_from_slice(&self.scheme);
-        buffer.put_i32(self.cred.len() as i32);
-        buffer.extend_from_slice(&self.cred);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + 4 + self.scheme.len() + 4 + self.cred.len()
-    }
-}
-
-#[derive(Debug)]
-pub struct CreateRequest {
-    pub path: String,
-    pub data: Vec<u8>,
-    pub acl: Vec<Acl>,
-    pub flags: i32,
-}
-
-#[derive(Debug)]
-pub struct CreateTTLRequest {
-    pub path: String,
-    pub data: Vec<u8>,
-    pub acl: Vec<Acl>,
-    pub flags: i32,
-    pub ttl: i64,
-}
-
-#[derive(Debug)]
-pub struct SetDataRequest {
-    path: String,
-    data: Vec<u8>,
-    version: i32,
-}
-
-impl Deserialize for SetDataRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let data = get_data(bytes)?;
-        let version = bytes.get_i32();
-        Ok(SetDataRequest { path, data, version })
-    }
-}
-
-impl Serialize for SetDataRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_i32(self.data.len() as i32);
-        buffer.extend_from_slice(&self.data);
-        buffer.put_i32(self.version);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 4 + self.data.len() + 4
-    }
-}
-
-
-impl Deserialize for CreateRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let data = get_data(bytes)?;
-        let acl = get_acl(bytes)?;
-        let flags = bytes.get_i32();
-        let req = CreateRequest {
-            path,
-            data,
-            acl,
-            flags,
-        };
-        Ok(req)
-    }
-}
-
-impl Serialize for CreateRequest {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_i32(self.data.len() as i32);
-        buffer.extend_from_slice(&self.data);
-        buffer.put_i32(self.acl.len() as i32);
-        for acl in &self.acl {
-            buffer.put_i32(acl.perms);
-            buffer.put_i32(acl.scheme.len() as i32);
-            buffer.extend_from_slice(&acl.scheme);
-            buffer.put_i32(acl.cred.len() as i32);
-            buffer.extend_from_slice(&acl.cred);
-        }
-        buffer.put_i32(self.flags);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 4 + self.data.len() + 4 + self.acl.iter().map(|it| it.size()).sum::<usize>() + 4
-    }
-}
-
-
-impl Deserialize for CreateTTLRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let data = get_data(bytes)?;
-        let acl = get_acl(bytes)?;
-        let flags = bytes.get_i32();
-        let ttl = bytes.get_i64();
-        let req = CreateTTLRequest {
-            path,
-            data,
-            acl,
-            flags,
-            ttl,
-        };
-        Ok(req)
-    }
-}
-
-impl Serialize for CreateTTLRequest {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-
-        buffer.put_i32(self.data.len() as i32);
-        buffer.extend_from_slice(&self.data);
-
-        buffer.put_i32(self.acl.len() as i32);
-        for acl in &self.acl {
-            acl.serialize_into(buffer)?;
-        }
-
-        buffer.put_i32(self.flags);
-        buffer.put_i64(self.ttl);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 4 + self.data.len() + 4 + self.acl.iter().map(|a| a.size()).sum::<usize>() + 4 + 8
-    }
-}
-
-#[derive(Debug)]
-pub struct DeleteRequest {
-    pub path: String,
-    pub version: i32,
-}
-
-impl Deserialize for DeleteRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let version = bytes.get_i32();
-        let req = DeleteRequest {
-            path,
-            version,
-        };
-        Ok(req)
-    }
-}
-
-impl Serialize for DeleteRequest {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_i32(self.version);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 4
-    }
-}
-
-#[derive(Debug)]
-pub struct GetChildrenRequest {
-    pub path: String,
-    pub watch: bool,
-}
-
-impl Serialize for GetChildrenRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_u8(self.watch as u8);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 1
-    }
-}
-
-impl Deserialize for GetChildrenRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let watch = bytes.get_u8();
-        let req = GetChildrenRequest {
-            path,
-            watch: watch != 0,
-        };
-        Ok(req)
-    }
-}
-
-#[derive(Debug)]
-pub struct ExistsRequest {
-    pub path: String,
-    pub watch: bool,
-}
-
-impl Serialize for ExistsRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_u8(self.watch as u8);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 1
-    }
-}
-
-impl Deserialize for ExistsRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let watch = bytes.get_u8();
-        let req = ExistsRequest {
-            path,
-            watch: watch != 0,
-        };
-        Ok(req)
-    }
-}
-
-#[derive(Debug)]
-pub struct GetAclRequest {
-    pub path: String,
-}
-
-impl Serialize for GetAclRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len()
-    }
-}
-
-impl Deserialize for GetAclRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let req = GetAclRequest {
-            path,
-        };
-        Ok(req)
-    }
-}
-
-
-#[derive(Debug)]
-pub struct SetAclRequest {
-    path: String,
-    acl: Vec<Acl>,
-    version: i32,
-}
-
-impl Serialize for SetAclRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_i32(self.acl.len() as i32);
-        for acl in &self.acl {
-            buffer.put_i32(acl.perms);
-            buffer.put_i32(acl.scheme.len() as i32);
-            buffer.extend_from_slice(&acl.scheme);
-            buffer.put_i32(acl.cred.len() as i32);
-            buffer.extend_from_slice(&acl.cred);
-        }
-        buffer.put_i32(self.version);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 4 + self.acl.iter().map(|a| 4 + 4 + a.scheme.len() + 4 + a.cred.len()).sum::<usize>() + 4
-    }
-}
-
-impl Deserialize for SetAclRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let acl_count = bytes.get_i32();
-        let mut acl = Vec::with_capacity(acl_count as usize);
-        for _ in 0..acl_count {
-            let perms = bytes.get_i32();
-            let scheme_len = bytes.get_i32();
-            let scheme = bytes.split_to(scheme_len as usize).to_vec();
-            let cred_len = bytes.get_i32();
-            let cred = bytes.split_to(cred_len as usize).to_vec();
-            acl.push(Acl {
-                perms,
-                scheme,
-                cred,
-            });
-        }
-        let version = bytes.get_i32();
-        let req = SetAclRequest {
-            path,
-            acl,
-            version,
-        };
-        Ok(req)
-    }
-}
-
-#[derive(Debug)]
-pub struct SetWatchesRequest {
-    relative_zxid: i64,
-    data_watches: Vec<String>,
-    exist_watches: Vec<String>,
-    child_watches: Vec<String>,
-}
-
-fn get_str_vec(bytes: &mut BytesMut) -> Result<Vec<String>, ZkError> {
-    let count = bytes.get_i32();
-    let mut vec = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let len = bytes.get_i32();
-        let s = bytes.split_to(len as usize);
-        vec.push(String::from_utf8(s.to_vec()).map_err(|e| ZkError::InvalidString)?);
-    }
-    Ok(vec)
-}
-
-impl Serialize for SetWatchesRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i64(self.relative_zxid);
-        buffer.put_i32(self.data_watches.len() as i32);
-        for path in &self.data_watches {
-            buffer.put_i32(path.len() as i32);
-            buffer.extend_from_slice(path.as_bytes());
-        }
-        buffer.put_i32(self.exist_watches.len() as i32);
-        for path in &self.exist_watches {
-            buffer.put_i32(path.len() as i32);
-            buffer.extend_from_slice(path.as_bytes());
-        }
-        buffer.put_i32(self.child_watches.len() as i32);
-        for path in &self.child_watches {
-            buffer.put_i32(path.len() as i32);
-            buffer.extend_from_slice(path.as_bytes());
-        }
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        8 + 4 + self.data_watches.iter().map(|p| 4 + p.len()).sum::<usize>() + 4
-            + self.exist_watches.iter().map(|p| 4 + p.len()).sum::<usize>()
-            + 4 + self.child_watches.iter().map(|p| 4 + p.len()).sum::<usize>()
-    }
-}
-
-impl Deserialize for SetWatchesRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        ensure_min_length_bytes(bytes, ZXID_LENGTH + INT_LENGTH * 3)?;
-        //todo
-        let relative_zxid = bytes.get_i64();
-        let data_watches = get_str_vec(bytes)?;
-        let exist_watches = get_str_vec(bytes)?;
-        let child_watches = get_str_vec(bytes)?;
-        let req = SetWatchesRequest {
-            relative_zxid,
-            data_watches,
-            exist_watches,
-            child_watches,
-        };
-        Ok(req)
-    }
-}
 
 #[derive(Debug)]
 pub enum Request {
     Connect(ConnectRequest),
-    Auth(AuthRequest),
+    Auth(AuthPacket),
     Create(CreateRequest),
     CreateTTL(CreateTTLRequest),
     Delete(DeleteRequest),
     Exists(ExistsRequest),
     GetData(GetDataRequest),
     SetData(SetDataRequest),
-    GetAcl(GetAclRequest),
-    SetAcl(SetAclRequest),
+    GetAcl(GetACLRequest),
+    SetAcl(SetACLRequest),
     GetChildren(GetChildrenRequest),
     GetChildren2(GetChildrenRequest),
-    Ping(PingRequest),
+    Ping,
     GetChildren3(GetChildrenRequest),
     // Check(CheckRequest),
 // Multi(MultiRequest),
-    Close(PingRequest),
-    SetWatches(SetWatchesRequest),
+    Close,
+    SetWatches(SetWatches),
 }
 
 impl Serialize for Request {
@@ -575,9 +49,9 @@ impl Serialize for Request {
             Request::SetAcl(req) => { req.serialize_into(buffer) }
             Request::GetChildren(req) => { req.serialize_into(buffer) }
             Request::GetChildren2(req) => { req.serialize_into(buffer) }
-            Request::Ping(req) => { req.serialize_into(buffer) }
+            Request::Ping => { Ok(()) }
             Request::GetChildren3(req) => { req.serialize_into(buffer) }
-            Request::Close(req) => { req.serialize_into(buffer) }
+            Request::Close => { Ok(()) }
             Request::SetWatches(req) => { req.serialize_into(buffer) }
             Request::Connect(req) => { req.serialize_into(buffer) }
             Request::Auth(req) => {
@@ -600,9 +74,9 @@ impl Serialize for Request {
             Request::SetAcl(req) => { req.size() }
             Request::GetChildren(req) => { req.size() }
             Request::GetChildren2(req) => { req.size() }
-            Request::Ping(req) => { req.size() }
+            Request::Ping => { 0 }
             Request::GetChildren3(req) => { req.size() }
-            Request::Close(req) => { req.size() }
+            Request::Close => { 0 }
             Request::SetWatches(req) => { req.size() }
             Request::Connect(req) => { req.size() }
             Request::Auth(req) => { req.size() }
@@ -630,24 +104,6 @@ impl Serialize for RequestPacket {
 
     fn size(&self) -> usize {
         self.request_header.as_ref().map_or(0, |h| h.size()) + self.request.size()
-    }
-}
-
-#[derive(Debug)]
-pub struct RequestHeader {
-    pub xid: i32,
-    pub opcode: i32,
-}
-
-impl Serialize for RequestHeader {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.xid);
-        buffer.put_i32(self.opcode);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        8
     }
 }
 
@@ -680,7 +136,7 @@ pub enum ZkResponse {
         stat: Stat,
     },
     GetAcl {
-        acl: Vec<Acl>,
+        acl: Vec<ACL>,
         stat: Stat,
     },
     Ping,
@@ -770,167 +226,6 @@ impl Serialize for ZkResponse {
     }
 }
 
-#[derive(Debug)]
-pub struct ReplyHeader {
-    pub xid: i32,
-    pub zxid: i64,
-    pub err: i32,
-}
-
-impl Serialize for ReplyHeader {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.xid);
-        buffer.put_i64(self.zxid);
-        buffer.put_i32(self.err);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        16
-    }
-}
-
-#[derive(Debug)]
-pub struct ConnectResponse {
-    pub protocol_version: i32,
-    pub timeout: i32,
-    pub session_id: i64,
-    pub passwd: Vec<u8>,
-    pub read_only: bool,
-}
-
-impl Serialize for ConnectResponse {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.protocol_version);
-        buffer.put_i32(self.timeout);
-        buffer.put_i64(self.session_id);
-        buffer.put_i32(self.passwd.len() as i32);
-        buffer.extend_from_slice(&self.passwd);
-        buffer.put_i8(self.read_only as i8);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + 4 + 8 + 4 + self.passwd.len() + 1
-    }
-}
-
-impl Deserialize for ConnectResponse {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        // let protocol_version = bytes.get_i32();
-        let timeout = bytes.get_i32();
-        let session_id = bytes.get_i64();
-        let passwd_len = bytes.get_i32();
-        let passwd = if passwd_len > 0 {
-            let mut vec = vec![0; passwd_len as usize];
-            bytes.copy_to_slice(&mut vec);
-            vec
-        } else {
-            vec![]
-        };
-        let read_only = if bytes.len() > 0 {
-            bytes.get_u8() == 1
-        } else {
-            false
-        };
-        Ok(Self {
-            // protocol_version,
-            protocol_version: 0,
-            timeout,
-            session_id,
-            passwd,
-            read_only,
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct Stat {
-    pub czxid: i64,
-    /// The last transaction that modified the znode.
-    pub mzxid: i64,
-    /// Milliseconds since epoch when the znode was created.
-    pub ctime: i64,
-    /// Milliseconds since epoch when the znode was last modified.
-    pub mtime: i64,
-    /// The number of changes to the data of the znode.
-    pub version: i32,
-    /// The number of changes to the children of the znode.
-    pub cversion: i32,
-    /// The number of changes to the ACL of the znode.
-    pub aversion: i32,
-    /// The session ID of the owner of this znode, if it is an ephemeral entry.
-    pub ephemeral_owner: i64,
-    /// The length of the data field of the znode.
-    pub data_length: i32,
-    /// The number of children this znode has.
-    pub num_children: i32,
-    /// The transaction ID that last modified the children of the znode.
-    pub pzxid: i64,
-}
-
-impl Serialize for Stat {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i64(self.czxid);
-        buffer.put_i64(self.mzxid);
-        buffer.put_i64(self.ctime);
-        buffer.put_i64(self.mtime);
-        buffer.put_i32(self.version);
-        buffer.put_i32(self.cversion);
-        buffer.put_i32(self.aversion);
-        buffer.put_i64(self.ephemeral_owner);
-        buffer.put_i32(self.data_length);
-        buffer.put_i32(self.num_children);
-        buffer.put_i64(self.pzxid);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        6 * 8 + 4 * 5
-    }
-}
-
-
-impl Deserialize for Stat {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        Ok(Self {
-            czxid: bytes.get_i64(),
-            mzxid: bytes.get_i64(),
-            ctime: bytes.get_i64(),
-            mtime: bytes.get_i64(),
-            version: bytes.get_i32(),
-            cversion: bytes.get_i32(),
-            aversion: bytes.get_i32(),
-            ephemeral_owner: bytes.get_i64(),
-            data_length: bytes.get_i32(),
-            num_children: bytes.get_i32(),
-            pzxid: bytes.get_i64(),
-        })
-    }
-}
-
-
-#[derive(Debug)]
-pub struct GetDataResponse {
-    pub data: Vec<u8>,
-    stat: Stat,
-}
-
-impl Serialize for GetDataResponse {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.data.len() as i32);
-        buffer.extend_from_slice(&self.data);
-
-        self.stat.serialize_into(buffer)?;
-
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.data.len() + self.stat.size()
-    }
-}
-
 #[derive(Debug, FromPrimitive, ToPrimitive)]
 pub enum XidCodes {
     ConnectXid = 0,
@@ -969,7 +264,7 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
         debug!("ClientPacketCodec encode: {:?}", item);
         if let Some(header) = &item.request_header {
             let xid = header.xid;
-            let op = header.opcode;
+            let op = header.r#type;
             self.requests_by_xid.insert(xid, OpCodes::from_i32(op).ok_or(ZkError::EncodeError)?);
             debug!("encode insert xid map {:?}:{:?}", xid, op);
         }
@@ -993,7 +288,8 @@ impl Decoder for ClientPacketCodec {
         match src {
             None => { return Ok(None); }
             Some((mut src, n)) => {
-                let xid = src.get_i32();
+                ensure_min_length_bytes(&src, 4)?;
+                let xid = i32::from_be_bytes(src[..4].try_into().unwrap());
                 let xid_enum = XidCodes::from_i32(xid);
 
                 if let Some(XidCodes::ConnectXid) = xid_enum {
@@ -1003,6 +299,7 @@ impl Decoder for ClientPacketCodec {
                         response: ZkResponse::Connect(resp),
                     }));
                 }
+                let xid = src.get_i32();
                 let zxid = src.get_i64();
                 let err = src.get_i32();
                 let reply_header = ReplyHeader {
@@ -1053,7 +350,7 @@ impl Decoder for ClientPacketCodec {
                         }));
                     }
                     OpCodes::GetData => {
-                        let data = get_data(&mut src)?;
+                        let data = Vec::<u8>::deserialize(&mut src)?;
                         let stat = Stat::deserialize(&mut src)?;
                         return Ok(Some(ResponsePacket {
                             response_header: Some(reply_header),
@@ -1068,21 +365,21 @@ impl Decoder for ClientPacketCodec {
                         }));
                     }
                     OpCodes::GetChildren => {
-                        let children = get_str_vec(&mut src)?;
+                        let children = Vec::<String>::deserialize(&mut src)?;
                         return Ok(Some(ResponsePacket {
                             response_header: Some(reply_header),
                             response: ZkResponse::Strings(children),
                         }));
                     }
                     OpCodes::Create | OpCodes::CreateTtl => {
-                        let path = get_str(&mut src)?;
+                        let path = String::deserialize(&mut src)?;
                         return Ok(Some(ResponsePacket {
                             response_header: Some(reply_header),
                             response: ZkResponse::String(path),
                         }));
                     }
                     OpCodes::GetAcl => {
-                        let acl = get_acl(&mut src)?;
+                        let acl = Vec::<ACL>::deserialize(&mut src)?;
                         let stat = Stat::deserialize(&mut src)?;
                         return Ok(Some(ResponsePacket {
                             response_header: Some(reply_header),
@@ -1096,7 +393,7 @@ impl Decoder for ClientPacketCodec {
                         }));
                     }
                     OpCodes::GetChildren2 => {
-                        let children = get_str_vec(&mut src)?;
+                        let children = Vec::<String>::deserialize(&mut src)?;
                         let stat = Stat::deserialize(&mut src)?;
                         return Ok(Some(ResponsePacket {
                             response_header: Some(reply_header),
@@ -1104,7 +401,7 @@ impl Decoder for ClientPacketCodec {
                         }));
                     }
                     OpCodes::CreateContainer => {
-                        let path = get_str(&mut src)?;
+                        let path = String::deserialize(&mut src)?;
                         return Ok(Some(ResponsePacket {
                             response_header: Some(reply_header),
                             response: ZkResponse::String(path),
@@ -1150,37 +447,40 @@ impl ServerPacketCodec {
         //       However, some client implementations might expose setWatches
         //       as a regular data request, so we support that as well.
 
-        let xid = src.get_i32();
+        let xid = i32::from_be_bytes(src[..4].try_into().unwrap());
+
         let xid_enum = XidCodes::from_i32(xid);
         if let Some(xid_enum) = xid_enum {
             match xid_enum {
                 XidCodes::ConnectXid => {
                     let req = ConnectRequest::deserialize(src)?;
+                    debug!("connect request: {:?}", req);
                     return Ok(Some(RequestPacket {
                         request_header: None,
                         request: Request::Connect(req),
                     }));
                 }
                 XidCodes::PingXid => {
-                    let opcode = src.get_i32();
+                    _ = src.get_i32(); // skip xid
+                    let r#type = src.get_i32();
                     return Ok(Some(RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
-                        request: Request::Ping(PingRequest {}),
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Ping,
                     }));
                 }
                 XidCodes::AuthXid => {
-                    let opcode = src.get_i32();
-                    let req = AuthRequest::deserialize(src)?;
+                    let r#type = src.get_i32();
+                    let req = AuthPacket::deserialize(src)?;
                     return Ok(Some(RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::Auth(req),
                     }));
                 }
                 XidCodes::SetWatchesXid => {
-                    let opcode = src.get_i32();
-                    let req = SetWatchesRequest::deserialize(src)?;
+                    let r#type = src.get_i32();
+                    let req = SetWatches::deserialize(src)?;
                     return Ok(Some(RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::SetWatches(req),
                     }));
                 }
@@ -1189,17 +489,17 @@ impl ServerPacketCodec {
                 }
             }
         }
-
+        let xid = src.get_i32();
         // Data requests, with XIDs > 0.
-        let opcode = src.get_i32();
-        let opcode_enum = OpCodes::from_i32(opcode).unwrap();
+        let r#type = src.get_i32();  // opcode
+        let opcode_enum = OpCodes::from_i32(r#type).unwrap();
         debug!("opcode_enum: {:?}", opcode_enum);
         match opcode_enum {
             OpCodes::GetData => {
                 let req = GetDataRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         // request: Box::new(req),
                         request: Request::GetData(req),
                     }));
@@ -1208,7 +508,7 @@ impl ServerPacketCodec {
                 let req = CreateTTLRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::CreateTTL(req),
                     }));
             }
@@ -1216,7 +516,7 @@ impl ServerPacketCodec {
                 let req = CreateRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::Create(req),
                     }));
             }
@@ -1224,7 +524,7 @@ impl ServerPacketCodec {
                 let req = SetDataRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::SetData(req),
                     }));
             }
@@ -1232,7 +532,7 @@ impl ServerPacketCodec {
                 let req = GetChildrenRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::GetChildren(req),
                     }));
             }
@@ -1240,7 +540,7 @@ impl ServerPacketCodec {
                 let req = DeleteRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::Delete(req),
                     }));
             }
@@ -1248,23 +548,23 @@ impl ServerPacketCodec {
                 let req = ExistsRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::Exists(req),
                     }));
             }
             OpCodes::GetAcl => {
-                let req = GetAclRequest::deserialize(src)?;
+                let req = GetACLRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::GetAcl(req),
                     }));
             }
             OpCodes::SetAcl => {
-                let req = SetAclRequest::deserialize(src)?;
+                let req = SetACLRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::SetAcl(req),
                     }));
             }
@@ -1276,16 +576,16 @@ impl ServerPacketCodec {
             OpCodes::RemoveWatches => {}
             OpCodes::Close => {
                 return Ok(Some(RequestPacket {
-                    request_header: Some(RequestHeader { xid, opcode }),
-                    request: Request::Close(PingRequest {}),
+                    request_header: Some(RequestHeader { xid, r#type }),
+                    request: Request::Close,
                 }));
             }
             OpCodes::SetAuth => {}
             OpCodes::SetWatches => {
-                let req = SetWatchesRequest::deserialize(src)?;
+                let req = SetWatches::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::SetWatches(req),
                     }));
             }
@@ -1358,53 +658,6 @@ fn ensure_max_len(len: usize) -> Result<(), ZkError> {
     Ok(())
 }
 
-fn get_acl(bytes: &mut bytes::BytesMut) -> Result<Vec<Acl>, ZkError> {
-    let len = bytes.get_i32();
-    if len <= 0 {
-        return Ok(vec![]);
-    }
-    if bytes.len() < len as usize {
-        return Err(ZkError::InvalidPacketLength(len));
-    }
-    ensure_max_len(len as usize)?;
-    let mut vec = vec![];
-    for _ in 0..len {
-        let perms = bytes.get_i32();
-        let scheme = get_data(bytes)?;
-        let cred = get_data(bytes)?;
-        vec.push(Acl {
-            perms,
-            scheme,
-            cred,
-        });
-    }
-    Ok(vec)
-}
-
-fn get_data(bytes: &mut bytes::BytesMut) -> Result<Vec<u8>, ZkError> {
-    let len = bytes.get_i32();
-    if len <= 0 {
-        return Ok(vec![]);
-    }
-    ensure_min_length_bytes(bytes, len)?;
-    ensure_max_length_bytes(bytes)?;
-    let mut vec = vec![0; len as usize];
-    bytes.copy_to_slice(&mut vec);
-    Ok(vec)
-}
-
-fn get_str(bytes: &mut bytes::BytesMut) -> Result<String, ZkError> {
-    ensure_min_length_bytes(bytes, INT_LENGTH)?;
-    let len = bytes.get_i32();
-
-    ensure_min_length_bytes(bytes, len)?;
-
-    ensure_max_len(len as usize)?;
-    let mut vec = vec![0; len as usize];
-    bytes.copy_to_slice(&mut vec);
-    let str = String::from_utf8(vec).map_err(|e| ZkError::InvalidString)?;
-    Ok(str)
-}
 
 fn maybe_read_bool(bytes: &mut bytes::BytesMut) -> bool {
     return if bytes.remaining() >= 1 {

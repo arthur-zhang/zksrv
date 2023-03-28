@@ -7,6 +7,8 @@ mod server;
 mod constants;
 mod record;
 mod length_codec;
+mod zk_errcode;
+mod proto;
 
 #[tokio::main]
 async fn main() -> Result<(), ZkError> {

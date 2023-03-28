@@ -2,14 +2,16 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use num_traits::ToPrimitive;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use crate::codec::{ClientPacketCodec, ReplyHeader, Request, ResponsePacket, ServerPacketCodec, ZkResponse};
+use crate::codec::{ClientPacketCodec,  Request, ResponsePacket, ServerPacketCodec, ZkResponse};
 use crate::constants::OpCodes;
 use crate::errors::ZkError;
+use crate::zk_errcode::ZooErrors;
 
 // c->p->b
 pub struct UpStreamConnection {
@@ -34,15 +36,15 @@ impl UpStreamConnection {
             println!("c->p: {:?}", r);
             let xid = r.request_header.as_ref().and_then(|it| Some(it.xid)).clone();
             if let Request::GetChildren(req) = &r.request {
-                if req.path == "/".to_string() {
-                    println!("get children of root");
-                    let resp = ResponsePacket {
-                        response_header: Some(ReplyHeader { xid: xid.unwrap(), zxid: 0, err: -102 }),
-                        response: ZkResponse::Ping,
-                    };
-                    let _ = self.tx.send(resp);
-                    continue;
-                }
+                // if req.path == "/".to_string() {
+                //     println!("get children of root");
+                //     let resp = ResponsePacket {
+                //         response_header: Some(ReplyHeader { xid: xid.unwrap(), zxid: 0, err: ZooErrors::ZNOAUTH.to_i32().unwrap() }),
+                //         response: ZkResponse::Ping,
+                //     };
+                //     let _ = self.tx.send(resp);
+                //     continue;
+                // }
             }
             let _ = p2b_framed.send(r).await;
         }
