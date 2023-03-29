@@ -34,10 +34,18 @@ pub enum OpCodes {
     RemoveWatches = 18,
     CreateContainer = 19,
     CreateTtl = 21,
-    Close = -11,
+    MultiRead = 22,
+
     SetAuth = 100,
     SetWatches = 101,
+    Sasl = 102,
     GetEphemerals = 103,
     GetAllChildrenNumber = 104,
     SetWatches2 = 105,
+    AddWatch = 106,
+    WhoAmI = 107,
+
+    CreateSession = -10,
+    Close = -11,
+    Error = -1,
 }
