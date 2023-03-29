@@ -311,7 +311,11 @@ impl Deserialize for ConnectRequest {
         let time_out = bytes.get_i32();
         let session_id = bytes.get_i64();
         let passwd = Vec::<u8>::deserialize(bytes)?;
-        let read_only = bytes.get_u8();
+        let read_only = if bytes.len() > 1 {
+            bytes.get_u8()
+        } else {
+            0
+        };
         Ok(Self {
             protocol_version,
             last_zxid_seen,
@@ -353,7 +357,11 @@ impl Deserialize for ConnectResponse {
         let time_out = bytes.get_i32();
         let session_id = bytes.get_i64();
         let passwd = Vec::<u8>::deserialize(bytes)?;
-        let read_only = bytes.get_u8();
+        let read_only = if bytes.len() > 1 {
+            bytes.get_u8()
+        } else {
+            0
+        };
         Ok(Self {
             protocol_version,
             time_out,
