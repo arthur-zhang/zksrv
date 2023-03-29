@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
+use log::{debug, info};
 use num_traits::ToPrimitive;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -33,7 +34,7 @@ impl UpStreamConnection {
             = FramedWrite::new(&mut self.p2b_write_half, ClientPacketCodec::new(map.clone()));
 
         while let Some(Ok(r)) = FramedRead::next(&mut c2p_framed).await {
-            println!("c->p: {:?}", r);
+            debug!("c->p: {:?}", r);
             let xid = r.request_header.as_ref().and_then(|it| Some(it.xid)).clone();
             if let Request::GetChildren(req) = &r.request {
                 // if req.path == "/".to_string() {
@@ -67,7 +68,7 @@ impl P2CDownStreamConnection {
         let mut writer = FramedWrite::new(&mut self.p2c_write_half, ServerPacketCodec::new());
 
         while let Some(res) = self.rx.recv().await {
-            println!("p->c: {:?}", res);
+            debug!("p->c: {:?}", res);
             let xid = res.response_header.as_ref().and_then(|it| Some(it.xid)).clone();
             let _ = writer.send(res).await;
             if let Some(xid) = xid {
@@ -118,13 +119,13 @@ impl ZkServer {
         let map = Arc::new(DashMap::new());
         tokio::select! {
             _ = upstream_conn.pipe(map.clone()) => {
-                println!("upstream_conn.pipe() done");
+                debug!("upstream_conn.pipe() done");
             }
             _ = p2c_downstream_conn.pipe(map.clone()) => {
-                println!("downstream_conn.pipe() done");
+                debug!("downstream_conn.pipe() done");
             }
             _ = b2p_downstream_conn.pipe(map.clone()) => {
-                println!("downstream_conn.pipe() done");
+                debug!("downstream_conn.pipe() done");
             }
         }
         Ok(())
@@ -135,7 +136,7 @@ impl ZkServer {
         println!("listen done");
         loop {
             let (c2p_socket, peer_addr) = listener.accept().await.unwrap();
-            println!("peer_addr: {:?}", peer_addr);
+            info!("peer_addr: {:?}", peer_addr);
             tokio::spawn(async move {
                 if let Err(err) = Self::handle_conn(c2p_socket).await {
                     println!("handle_conn error: {:?}", err);

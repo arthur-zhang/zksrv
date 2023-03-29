@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::{Buf, BufMut, BytesMut};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use log::debug;
+use log::{debug, info};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 use tokio_util::codec::{Decoder, Encoder};
@@ -11,7 +11,7 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::constants::*;
 use crate::errors::ZkError;
 use crate::length_codec::LengthDelimitedCodec;
-use crate::proto::{ACL, AuthPacket, ConnectRequest, ConnectResponse, CreateRequest, CreateTTLRequest, DeleteRequest, ExistsRequest, GetACLRequest, GetChildrenRequest, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader, SetACLRequest, SetDataRequest, SetWatches, SetWatches2, Stat};
+use crate::proto::{ACL, AuthPacket, ConnectRequest, ConnectResponse, CreateRequest, CreateTTLRequest, DeleteRequest, ExistsRequest, GetACLRequest, GetChildren2Request, GetChildrenRequest, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader, SetACLRequest, SetDataRequest, SetWatches, SetWatches2, Stat, WatcherEvent};
 use crate::record::{Deserialize, Serialize};
 
 
@@ -28,7 +28,7 @@ pub enum Request {
     GetAcl(GetACLRequest),
     SetAcl(SetACLRequest),
     GetChildren(GetChildrenRequest),
-    GetChildren2(GetChildrenRequest),
+    GetChildren2(GetChildren2Request),
     Ping,
     GetChildren3(GetChildrenRequest),
     // Check(CheckRequest),
@@ -131,6 +131,7 @@ impl Serialize for ResponsePacket {
 pub enum ZkResponse {
     Connect(ConnectResponse),
     GetData(GetDataResponse),
+    WatchEvent(WatcherEvent),
     GetChildren2 {
         children: Vec<String>,
         stat: Stat,
@@ -183,12 +184,11 @@ impl Serialize for ZkResponse {
             }
             ZkResponse::Multi(_) => { todo!() }
             ZkResponse::GetChildren2 { children, stat } => {
-                buffer.put_i32(children.len() as i32);
-                for s in children {
-                    buffer.put_i32(s.len() as i32);
-                    buffer.put_slice(s.as_bytes());
-                }
+                children.serialize_into(buffer)?;
                 stat.serialize_into(buffer)?;
+            }
+            ZkResponse::WatchEvent(req) => {
+                req.serialize_into(buffer)?;
             }
         }
         Ok(())
@@ -220,7 +220,10 @@ impl Serialize for ZkResponse {
             }
             ZkResponse::Multi(_) => { todo!() }
             ZkResponse::GetChildren2 { children, stat } => {
-                4 + children.iter().map(|s| 4 + s.len()).sum::<usize>() + stat.size()
+                children.size() + stat.size()
+            }
+            ZkResponse::WatchEvent(req) => {
+                req.size()
             }
         }
     }
@@ -277,6 +280,7 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
     }
 }
 
+// b->p message decode
 impl Decoder for ClientPacketCodec {
     type Item = ResponsePacket;
     type Error = ZkError;
@@ -299,6 +303,7 @@ impl Decoder for ClientPacketCodec {
                         response: ZkResponse::Connect(resp),
                     }));
                 }
+
                 let xid = src.get_i32();
                 let zxid = src.get_i64();
                 let err = src.get_i32();
@@ -307,7 +312,31 @@ impl Decoder for ClientPacketCodec {
                     zxid,
                     err,
                 };
+
                 debug!("xid: {}, zxid: {}, err: {}", xid, zxid, err);
+                match xid_enum {
+                    Some(XidCodes::WatchXid) => {
+                        debug!("watch event{}", src.len());
+                        let resp = WatcherEvent::deserialize(&mut src)?;
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::WatchEvent(resp),
+                        }));
+                    }
+                    Some(XidCodes::PingXid) => {
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::Empty,
+                        }));
+                    }
+
+                    Some(_) => {
+                        panic!("xid: {}", xid)
+                    }
+                    _ => {}
+                }
+
+
                 if err != 0 {
                     return Ok(Some(ResponsePacket {
                         response_header: Some(reply_header),
@@ -319,7 +348,10 @@ impl Decoder for ClientPacketCodec {
                     match xid_enum.unwrap() {
                         XidCodes::ConnectXid => { unreachable!() }
                         XidCodes::WatchXid => {
-                            todo!()
+                            return Ok(Some(ResponsePacket {
+                                response_header: Some(reply_header),
+                                response: ZkResponse::Empty,
+                            }));
                         }
                         XidCodes::PingXid => {
                             return Ok(Some(ResponsePacket {
@@ -371,8 +403,17 @@ impl Decoder for ClientPacketCodec {
                             response: ZkResponse::Strings(children),
                         }));
                     }
+                    OpCodes::GetChildren2 => {
+                        let children = Vec::<String>::deserialize(&mut src)?;
+                        let stat = Stat::deserialize(&mut src)?;
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::GetChildren2 { children, stat },
+                        }));
+                    }
                     OpCodes::Create | OpCodes::CreateTtl => {
                         let path = String::deserialize(&mut src)?;
+
                         return Ok(Some(ResponsePacket {
                             response_header: Some(reply_header),
                             response: ZkResponse::String(path),
@@ -392,19 +433,24 @@ impl Decoder for ClientPacketCodec {
                             response: ZkResponse::Empty,
                         }));
                     }
-                    OpCodes::GetChildren2 => {
-                        let children = Vec::<String>::deserialize(&mut src)?;
-                        let stat = Stat::deserialize(&mut src)?;
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::GetChildren2 { children, stat },
-                        }));
-                    }
                     OpCodes::CreateContainer => {
                         let path = String::deserialize(&mut src)?;
                         return Ok(Some(ResponsePacket {
                             response_header: Some(reply_header),
                             response: ZkResponse::String(path),
+                        }));
+                    }
+                    OpCodes::SetAuth => {
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::Empty,
+                        }));
+                    }
+                    OpCodes::SetWatches => {
+                        info!("SetWatches remaining len: {:?}", src.len());
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::Empty,
                         }));
                     }
                     _ => {
@@ -450,6 +496,7 @@ impl ServerPacketCodec {
         let xid = i32::from_be_bytes(src[..4].try_into().unwrap());
 
         let xid_enum = XidCodes::from_i32(xid);
+        debug!("xid_enum = {:?}", xid_enum);
         if let Some(xid_enum) = xid_enum {
             match xid_enum {
                 XidCodes::ConnectXid => {
@@ -528,12 +575,20 @@ impl ServerPacketCodec {
                         request: Request::SetData(req),
                     }));
             }
-            OpCodes::GetChildren | OpCodes::GetChildren2 => {
+            OpCodes::GetChildren => {
                 let req = GetChildrenRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::GetChildren(req),
+                    }));
+            }
+            OpCodes::GetChildren2 => {
+                let req = GetChildren2Request::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::GetChildren2(req),
                     }));
             }
             OpCodes::Delete => {
@@ -580,7 +635,14 @@ impl ServerPacketCodec {
                     request: Request::Close,
                 }));
             }
-            OpCodes::SetAuth => {}
+            OpCodes::SetAuth => {
+                let req = AuthPacket::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Auth(req),
+                    }));
+            }
             OpCodes::SetWatches => {
                 let req = SetWatches::deserialize(src)?;
                 return Ok(Some(
@@ -592,7 +654,9 @@ impl ServerPacketCodec {
             OpCodes::GetEphemerals => {}
             OpCodes::GetAllChildrenNumber => {}
             OpCodes::SetWatches2 => {}
-            _ => {}
+            _ => {
+                todo!("{:?}", opcode_enum)
+            }
         }
         unreachable!()
     }
