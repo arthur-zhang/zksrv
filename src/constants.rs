@@ -12,7 +12,7 @@ pub const MULTI_HEADER_LENGTH: i32 = 9;
 pub const PROTOCOL_VERSION_LENGTH: i32 = 4;
 pub const SERVER_HEADER_LENGTH: i32 = 16;
 
-#[derive(Debug, ToPrimitive, FromPrimitive)]
+#[derive(Debug, ToPrimitive, FromPrimitive,Clone)]
 pub enum OpCodes {
     Connect = 0,
     Create = 1,
@@ -35,7 +35,6 @@ pub enum OpCodes {
     CreateContainer = 19,
     CreateTtl = 21,
     MultiRead = 22,
-
     SetAuth = 100,
     SetWatches = 101,
     Sasl = 102,
@@ -44,7 +43,6 @@ pub enum OpCodes {
     SetWatches2 = 105,
     AddWatch = 106,
     WhoAmI = 107,
-
     CreateSession = -10,
     Close = -11,
     Error = -1,

@@ -1,5 +1,5 @@
-use std::io::{Cursor, IoSlice};
 use std::sync::Arc;
+
 use bytes::{Buf, BufMut, BytesMut};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
@@ -11,9 +11,9 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::constants::*;
 use crate::errors::ZkError;
 use crate::length_codec::LengthDelimitedCodec;
-use crate::proto::{ACL, AuthPacket, CheckWatchesRequest, ConnectRequest, ConnectResponse, Create2Response, CreateRequest, CreateTTLRequest, DeleteRequest, ExistsRequest, GetACLRequest, GetChildren2Request, GetChildrenRequest, GetDataRequest, GetDataResponse, ReplyHeader, RequestHeader, SetACLRequest, SetDataRequest, SetWatches, SetWatches2, Stat, WatcherEvent, WhoAmIResponse};
+use crate::proto::*;
 use crate::record::{Deserialize, Serialize};
-
+use crate::zk_errcode::ZooErrors;
 
 #[derive(Debug)]
 pub enum Request {
@@ -32,11 +32,103 @@ pub enum Request {
     Ping,
     Whoami,
     GetChildren3(GetChildrenRequest),
+    Multi(MultiRequest),
     // Check(CheckRequest),
 // Multi(MultiRequest),
     Close,
     SetWatches(SetWatches),
     CheckWatches(CheckWatchesRequest),
+}
+
+#[derive(Debug)]
+pub struct MultiRequest {
+    ops: Vec<(MultiHeader, Request)>,
+    done_header: MultiHeader,
+}
+
+impl Serialize for MultiRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        for (header, req) in &self.ops {
+            header.serialize_into(buffer)?;
+            req.serialize_into(buffer)?;
+        }
+        self.done_header.serialize_into(buffer)?;
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        let mut size = 0;
+        for (header, req) in &self.ops {
+            size += header.size();
+            size += req.size();
+        }
+        size += self.done_header.size();
+        size
+    }
+}
+
+impl Deserialize for MultiRequest {
+    fn deserialize(buffer: &mut BytesMut) -> Result<Self, ZkError> {
+        let mut ops = Vec::new();
+        let done_header: MultiHeader;
+        loop {
+            let header = MultiHeader::deserialize(buffer)?;
+            if header.done == 1 {
+                done_header = header;
+                break;
+            }
+            let opcode = OpCodes::from_i32(header.r#type).ok_or(ZkError::InvalidOpCode(header.r#type))?;
+
+            let req = Request::deserialize(buffer, opcode)?;
+            ops.push((header, req));
+        }
+        Ok(MultiRequest {
+            ops,
+            done_header,
+        })
+    }
+}
+
+impl Request {
+    fn deserialize(bytes: &mut BytesMut, op_type: OpCodes) -> Result<Self, ZkError> {
+        match op_type {
+            OpCodes::Create => {
+                return Ok(Request::Create(CreateRequest::deserialize(bytes)?));
+            }
+            OpCodes::Create2 => {
+                return Ok(Request::Create(CreateRequest::deserialize(bytes)?));
+            }
+            OpCodes::CreateTtl => {
+                return Ok(Request::CreateTTL(CreateTTLRequest::deserialize(bytes)?));
+            }
+            OpCodes::CreateContainer => {
+                return Ok(Request::Create(CreateRequest::deserialize(bytes)?));
+            }
+            OpCodes::Delete => {
+                return Ok(Request::Delete(DeleteRequest::deserialize(bytes)?));
+            }
+            OpCodes::SetData => {
+                return Ok(Request::SetData(SetDataRequest::deserialize(bytes)?));
+            }
+            OpCodes::Check => {
+                //todo
+                todo!()
+            }
+            OpCodes::GetChildren => {
+                return Ok(Request::GetChildren(GetChildrenRequest::deserialize(bytes)?));
+            }
+            OpCodes::Exists => {
+                return Ok(Request::Exists(ExistsRequest::deserialize(bytes)?));
+            }
+            OpCodes::GetData => {
+                return Ok(Request::GetData(GetDataRequest::deserialize(bytes)?));
+            }
+
+            _ => {
+                unreachable!("unimplemented opcode: {:?}", op_type)
+            }
+        }
+    }
 }
 
 impl Serialize for Request {
@@ -68,6 +160,9 @@ impl Serialize for Request {
             Request::Whoami => {
                 Ok(())
             }
+            Request::Multi(req) => {
+                req.serialize_into(buffer)
+            }
         }
     }
 
@@ -97,9 +192,86 @@ impl Serialize for Request {
             Request::Whoami => {
                 0
             }
+            Request::Multi(req) => {
+                req.size()
+            }
         }
     }
 }
+
+#[derive(Debug)]
+pub struct MultiResponse {
+    results: Vec<Result<(ZkResponse, MultiHeader), ZooErrors>>,
+    done_header: MultiHeader,
+}
+
+impl Serialize for MultiResponse {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        for result in &self.results {
+            match result {
+                Ok((response, header)) => {
+                    header.serialize_into(buffer)?;
+                    // response.serialize_into(buffer)?;
+
+                }
+                Err(err) => {
+                    let header = MultiHeader {
+                        r#type: -1,
+                        done: 0,
+                        err: err.to_i32().unwrap(),
+                    };
+                    header.serialize_into(buffer)?;
+                }
+            }
+        }
+        self.done_header.serialize_into(buffer)?;
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        let mut size = 0;
+        for result in &self.results {
+            match result {
+                Ok((response, header)) => {
+                    size += header.size() + response.size();
+                }
+                Err(_) => {
+                    size += 4 + 1 + 4;
+                }
+            }
+        }
+        size + self.done_header.size()
+    }
+}
+
+impl Deserialize for MultiResponse {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let mut results = vec![];
+        let done_header: MultiHeader;
+        loop {
+            let header = MultiHeader::deserialize(bytes)?;
+            if header.done == 1 {
+                done_header = header;
+                break;
+            }
+            let opcode = header.r#type;
+            let err = header.err;
+            if opcode == -1 {
+                results.push(Ok((ZkResponse::Err(err), header)));
+                continue;
+            }
+            let opcode_enum = OpCodes::from_i32(opcode);
+
+            let response = ZkResponse::deserialize(bytes, opcode_enum)?;
+            results.push(Ok((response, header)));
+        }
+        return Ok(MultiResponse {
+            results,
+            done_header,
+        });
+    }
+}
+
 
 #[derive(Debug)]
 pub struct RequestPacket {
@@ -145,6 +317,8 @@ impl Serialize for ResponsePacket {
 pub enum ZkResponse {
     Connect(ConnectResponse),
     GetData(GetDataResponse),
+    SetData(SetDataResponse),
+    Create(CreateResponse),
     Create2(Create2Response),
     WatchEvent(WatcherEvent),
     WhoAmI(WhoAmIResponse),
@@ -161,8 +335,111 @@ pub enum ZkResponse {
     Empty,
     Strings(Vec<String>),
     String(String),
-    Multi(Vec<Result<ZkResponse, ZkError>>),
+    Multi(MultiResponse),
+    Err(i32),
+}
 
+impl ZkResponse {
+    fn deserialize(src: &mut BytesMut, opcode: Option<OpCodes>) -> Result<Self, ZkError> {
+        let opcode = opcode.ok_or(ZkError::InvalidOpCode(-1))?;
+
+        match opcode {
+            OpCodes::Connect => {
+                unreachable!("should not be here");
+            }
+
+            OpCodes::Exists | OpCodes::SetData | OpCodes::SetAcl => {
+                let stat = Stat::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Stat(stat));
+            }
+            OpCodes::GetData => {
+                let data = Vec::<u8>::deserialize(src)?;
+                let stat = Stat::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::GetData(GetDataResponse { data, stat }));
+            }
+
+            OpCodes::Delete | OpCodes::Close => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::GetChildren => {
+                let children = Vec::<String>::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Strings(children));
+            }
+            OpCodes::GetChildren2 => {
+                let children = Vec::<String>::deserialize(src)?;
+                let stat = Stat::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::GetChildren2 { children, stat });
+            }
+            OpCodes::Create => {
+                let resp = CreateResponse::deserialize(src)?;
+
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Create(resp));
+            }
+            OpCodes::CreateTtl => {
+                let path = String::deserialize(src)?;
+
+                assert!(src.is_empty());
+                return Ok(ZkResponse::String(path));
+            }
+            OpCodes::GetAcl => {
+                let acl = Vec::<ACL>::deserialize(src)?;
+                let stat = Stat::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::GetAcl { acl, stat });
+            }
+            OpCodes::Check => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::CreateContainer => {
+                let path = String::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::String(path));
+            }
+            OpCodes::SetAuth => {
+                info!(">>>>>>>>>>>>>>>>>.set auth");
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::SetWatches => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::Create2 => {
+                let res = Create2Response::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Create2(res));
+            }
+            OpCodes::CheckWatches => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::WhoAmI => {
+                let res = WhoAmIResponse::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::WhoAmI(res));
+            }
+            OpCodes::Multi => {
+                let res = MultiResponse::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Multi(res));
+            }
+            OpCodes::Error => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            _ => {
+                info!("unhandled opcode: {:?}", opcode);
+                todo!("{:?}", opcode);
+            }
+        }
+    }
 }
 
 
@@ -212,6 +489,15 @@ impl Serialize for ZkResponse {
             ZkResponse::WhoAmI(res) => {
                 res.serialize_into(buffer)?;
             }
+            ZkResponse::SetData(res) => {
+                res.serialize_into(buffer)?;
+            }
+            ZkResponse::Create(res) => {
+                res.serialize_into(buffer)?;
+            }
+            ZkResponse::Err(err) => {
+                buffer.put_i32(*err);
+            }
         }
         Ok(())
     }
@@ -252,6 +538,15 @@ impl Serialize for ZkResponse {
             }
             ZkResponse::WhoAmI(req) => {
                 req.size()
+            }
+            ZkResponse::SetData(req) => {
+                req.size()
+            }
+            ZkResponse::Create(req) => {
+                req.size()
+            }
+            ZkResponse::Err(_) => {
+                4
             }
         }
     }
@@ -406,137 +701,16 @@ impl Decoder for ClientPacketCodec {
                     }
                 }
                 let opcode = self.requests_by_xid.get(&xid).ok_or(ZkError::DecodeError)?;
-                let opcode = opcode.value().clone();
+                let opcode = opcode.clone();
 
                 debug!("ClientPacketCodec decoder, opcode: {:?}, remaining len: {}", opcode, src.len());
-                match opcode {
-                    OpCodes::Connect => {
-                        unreachable!("should not be here");
-                    }
-
-                    OpCodes::Exists | OpCodes::SetData | OpCodes::SetAcl => {
-                        let stat = Stat::deserialize(&mut src)?;
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::Stat(stat),
-                        }));
-                    }
-                    OpCodes::GetData => {
-                        let data = Vec::<u8>::deserialize(&mut src)?;
-                        let stat = Stat::deserialize(&mut src)?;
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::GetData(GetDataResponse { data, stat }),
-                        }));
-                    }
-
-                    OpCodes::Delete | OpCodes::Close => {
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::Empty,
-                        }));
-                    }
-                    OpCodes::GetChildren => {
-                        let children = Vec::<String>::deserialize(&mut src)?;
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::Strings(children),
-                        }));
-                    }
-                    OpCodes::GetChildren2 => {
-                        let children = Vec::<String>::deserialize(&mut src)?;
-                        let stat = Stat::deserialize(&mut src)?;
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::GetChildren2 { children, stat },
-                        }));
-                    }
-                    OpCodes::Create | OpCodes::CreateTtl => {
-                        let path = String::deserialize(&mut src)?;
-
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::String(path),
-                        }));
-                    }
-                    OpCodes::GetAcl => {
-                        let acl = Vec::<ACL>::deserialize(&mut src)?;
-                        let stat = Stat::deserialize(&mut src)?;
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::GetAcl { acl, stat },
-                        }));
-                    }
-                    OpCodes::Check => {
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::Empty,
-                        }));
-                    }
-                    OpCodes::CreateContainer => {
-                        let path = String::deserialize(&mut src)?;
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::String(path),
-                        }));
-                    }
-                    OpCodes::SetAuth => {
-                        info!(">>>>>>>>>>>>>>>>>.set auth");
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::Empty,
-                        }));
-                    }
-                    OpCodes::SetWatches => {
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::Empty,
-                        }));
-                    }
-                    OpCodes::Create2 => {
-                        let res = Create2Response::deserialize(&mut src)?;
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::Create2(res),
-                        }));
-                    }
-                    OpCodes::CheckWatches => {
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::Empty,
-                        }));
-                    }
-                    OpCodes::WhoAmI => {
-                        let res = WhoAmIResponse::deserialize(&mut src)?;
-                        assert!(src.is_empty());
-                        return Ok(Some(ResponsePacket {
-                            response_header: Some(reply_header),
-                            response: ZkResponse::WhoAmI(res),
-                        }));
-                    }
-                    _ => {
-                        todo!("{:?}", opcode);
-                    }
-                }
+                let resp = ZkResponse::deserialize(&mut src, Some(opcode))?;
+                return Ok(Some(ResponsePacket {
+                    response_header: Some(reply_header),
+                    response: resp,
+                }));
             }
         }
-        todo!();
-
-
-        Ok(None)
     }
 }
 
@@ -750,6 +924,16 @@ impl ServerPacketCodec {
                     RequestPacket {
                         request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::Whoami,
+                    }));
+            }
+            OpCodes::Multi => {
+                let req = MultiRequest::deserialize(src)?;
+                info!("multi request: {:?}", req);
+                assert!(src.is_empty());
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Multi(req),
                     }));
             }
             _ => {
