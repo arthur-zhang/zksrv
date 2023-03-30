@@ -39,21 +39,21 @@ impl UpStreamConnection {
         while let Some(Ok(r)) = c2p_framed.next().await {
             let xid = r.request_header.as_ref().and_then(|it| Some(it.xid)).clone();
             if let Request::GetChildren2(req) = &r.request {
-                if req.path == "/a".to_string() {
-                    let resp = ResponsePacket {
-                        response_header: Some(ReplyHeader {
-                            xid: xid.unwrap(),
-                            zxid: 0,
-                            err: ZooErrors::ZNOAUTH.to_i32().unwrap(),
-                        }),
-                        response: ZkResponse::Empty,
-                    };
-                    let mut bytes = BytesMut::with_capacity(resp.size()+4);
-                    bytes.put_i32(resp.size() as i32);
-                    resp.serialize_into(&mut bytes).unwrap();
-                    let _ = self.tx.send(bytes.freeze());
-                    continue;
-                }
+                // if req.path == "/a".to_string() {
+                //     let resp = ResponsePacket {
+                //         response_header: Some(ReplyHeader {
+                //             xid: xid.unwrap(),
+                //             zxid: 0,
+                //             err: ZooErrors::ZNOAUTH.to_i32().unwrap(),
+                //         }),
+                //         response: ZkResponse::Empty,
+                //     };
+                //     let mut bytes = BytesMut::with_capacity(resp.size()+4);
+                //     bytes.put_i32(resp.size() as i32);
+                //     resp.serialize_into(&mut bytes).unwrap();
+                //     let _ = self.tx.send(bytes.freeze());
+                //     continue;
+                // }
             }
             let _ = p2b_framed.send(r).await;
         }

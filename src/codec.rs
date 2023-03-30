@@ -38,6 +38,7 @@ pub enum Request {
     Close,
     SetWatches(SetWatches),
     CheckWatches(CheckWatchesRequest),
+    Sync(SyncRequest),
 }
 
 #[derive(Debug)]
@@ -111,8 +112,7 @@ impl Request {
                 return Ok(Request::SetData(SetDataRequest::deserialize(bytes)?));
             }
             OpCodes::Check => {
-                //todo
-                todo!()
+                return Ok(Request::CheckWatches(CheckWatchesRequest::deserialize(bytes)?));
             }
             OpCodes::GetChildren => {
                 return Ok(Request::GetChildren(GetChildrenRequest::deserialize(bytes)?));
@@ -163,6 +163,9 @@ impl Serialize for Request {
             Request::Multi(req) => {
                 req.serialize_into(buffer)
             }
+            Request::Sync(req) => {
+                req.serialize_into(buffer)
+            }
         }
     }
 
@@ -195,6 +198,9 @@ impl Serialize for Request {
             Request::Multi(req) => {
                 req.size()
             }
+            Request::Sync(req) => {
+                req.size()
+            }
         }
     }
 }
@@ -212,7 +218,6 @@ impl Serialize for MultiResponse {
                 Ok((response, header)) => {
                     header.serialize_into(buffer)?;
                     // response.serialize_into(buffer)?;
-
                 }
                 Err(err) => {
                     let header = MultiHeader {
@@ -936,6 +941,17 @@ impl ServerPacketCodec {
                         request: Request::Multi(req),
                     }));
             }
+            OpCodes::Sync => {
+                let req = SyncRequest::deserialize(src)?;
+                info!("sync request: {:?}", req);
+                assert!(src.is_empty());
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Sync(req),
+                    }));
+            }
+
             _ => {
                 panic!("{:?}", opcode_enum)
             }
