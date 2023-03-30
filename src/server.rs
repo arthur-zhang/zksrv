@@ -1,17 +1,21 @@
 use std::sync::Arc;
 
+use bytes::{BufMut, Bytes, BytesMut};
 use dashmap::DashMap;
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use log::{debug, info};
 use num_traits::ToPrimitive;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_stream::StreamExt;
+use tokio_util::codec::{BytesCodec, FramedRead, FramedWrite};
 
-use crate::codec::{ClientPacketCodec,  Request, ResponsePacket, ServerPacketCodec, ZkResponse};
+use crate::codec::{ClientPacketCodec, Request, ResponsePacket, ServerPacketCodec, ZkResponse};
 use crate::constants::OpCodes;
 use crate::errors::ZkError;
+use crate::proto::ReplyHeader;
+use crate::record::Serialize;
 use crate::zk_errcode::ZooErrors;
 
 // c->p->b
@@ -19,11 +23,11 @@ pub struct UpStreamConnection {
     c2p_read_half: OwnedReadHalf,
     p2b_write_half: OwnedWriteHalf,
 
-    tx: UnboundedSender<ResponsePacket>,
+    tx: UnboundedSender<Bytes>,
 }
 
 impl UpStreamConnection {
-    fn new(c2p_read_half: OwnedReadHalf, p2b_write_half: OwnedWriteHalf, tx: UnboundedSender<ResponsePacket>) -> Self {
+    fn new(c2p_read_half: OwnedReadHalf, p2b_write_half: OwnedWriteHalf, tx: UnboundedSender<Bytes>) -> Self {
         return Self { c2p_read_half, p2b_write_half, tx };
     }
 
@@ -32,20 +36,24 @@ impl UpStreamConnection {
             = FramedRead::new(&mut self.c2p_read_half, ServerPacketCodec::new());
         let mut p2b_framed
             = FramedWrite::new(&mut self.p2b_write_half, ClientPacketCodec::new(map.clone()));
-
-        while let Some(Ok(r)) = FramedRead::next(&mut c2p_framed).await {
-            debug!("c->p: {:?}", r);
+        while let Some(Ok(r)) = c2p_framed.next().await {
             let xid = r.request_header.as_ref().and_then(|it| Some(it.xid)).clone();
-            if let Request::GetChildren(req) = &r.request {
-                // if req.path == "/".to_string() {
-                //     println!("get children of root");
-                //     let resp = ResponsePacket {
-                //         response_header: Some(ReplyHeader { xid: xid.unwrap(), zxid: 0, err: ZooErrors::ZNOAUTH.to_i32().unwrap() }),
-                //         response: ZkResponse::Ping,
-                //     };
-                //     let _ = self.tx.send(resp);
-                //     continue;
-                // }
+            if let Request::GetChildren2(req) = &r.request {
+                if req.path == "/a".to_string() {
+                    let resp = ResponsePacket {
+                        response_header: Some(ReplyHeader {
+                            xid: xid.unwrap(),
+                            zxid: 0,
+                            err: ZooErrors::ZNOAUTH.to_i32().unwrap(),
+                        }),
+                        response: ZkResponse::Empty,
+                    };
+                    let mut bytes = BytesMut::with_capacity(resp.size()+4);
+                    bytes.put_i32(resp.size() as i32);
+                    resp.serialize_into(&mut bytes).unwrap();
+                    let _ = self.tx.send(bytes.freeze());
+                    continue;
+                }
             }
             let _ = p2b_framed.send(r).await;
         }
@@ -57,23 +65,23 @@ impl UpStreamConnection {
 // c<-p
 struct P2CDownStreamConnection {
     p2c_write_half: OwnedWriteHalf,
-    rx: UnboundedReceiver<ResponsePacket>,
+    rx: UnboundedReceiver<Bytes>,
 }
 
 impl P2CDownStreamConnection {
-    fn new(p2c_write_half: OwnedWriteHalf, rx: UnboundedReceiver<ResponsePacket>) -> Self {
+    fn new(p2c_write_half: OwnedWriteHalf, rx: UnboundedReceiver<Bytes>) -> Self {
         return Self { p2c_write_half, rx };
     }
     async fn pipe(&mut self, map: Arc<DashMap<i32, OpCodes>>) -> std::io::Result<()> {
-        let mut writer = FramedWrite::new(&mut self.p2c_write_half, ServerPacketCodec::new());
+        let mut writer = FramedWrite::new(&mut self.p2c_write_half, BytesCodec::new());
 
         while let Some(res) = self.rx.recv().await {
-            debug!("p->c: {:?}", res);
-            let xid = res.response_header.as_ref().and_then(|it| Some(it.xid)).clone();
             let _ = writer.send(res).await;
-            if let Some(xid) = xid {
-                map.remove(&xid);
-            }
+            // let xid = res.response_header.as_ref().and_then(|it| Some(it.xid)).clone();
+            // let _ = writer.send(res).await;
+            // if let Some(xid) = xid {
+            //     map.remove(&xid);
+            // }
         }
         Ok(())
     }
@@ -82,18 +90,18 @@ impl P2CDownStreamConnection {
 
 pub struct B2PDownStreamConnection {
     b2p_read_half: OwnedReadHalf,
-    tx: UnboundedSender<ResponsePacket>,
+    tx: UnboundedSender<Bytes>,
 }
 
 impl B2PDownStreamConnection {
-    fn new(b2p_read_half: OwnedReadHalf, tx: UnboundedSender<ResponsePacket>) -> Self {
+    fn new(b2p_read_half: OwnedReadHalf, tx: UnboundedSender<Bytes>) -> Self {
         return Self { b2p_read_half, tx };
     }
     async fn pipe(&mut self, map: Arc<DashMap<i32, OpCodes>>) -> std::io::Result<()> {
-        let mut framed_reader = FramedRead::new(&mut self.b2p_read_half, ClientPacketCodec::new(map.clone()));
+        let mut framed_reader = FramedRead::new(&mut self.b2p_read_half, BytesCodec::new());
 
         while let Some(Ok(res)) = framed_reader.next().await {
-            let _ = self.tx.send(res);
+            let _ = self.tx.send(res.freeze());
         }
         Ok(())
     }
