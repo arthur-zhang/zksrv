@@ -1,460 +1,137 @@
+use std::sync::Arc;
+
 use bytes::{Buf, BufMut, BytesMut};
+use dashmap::DashMap;
 use lazy_static::lazy_static;
+use log::{debug, error, info};
 use num_derive::{FromPrimitive, ToPrimitive};
-use num_traits::FromPrimitive;
-use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
+use num_traits::{FromPrimitive, ToPrimitive};
+use tokio_util::codec::{Decoder, Encoder};
 
 use crate::constants::*;
 use crate::errors::ZkError;
-use crate::record::{Deserialize, Record};
-
-#[derive(Debug)]
-pub struct ConnectRequest {
-    pub protocol_version: i32,
-    pub last_zxid_seen: i64,
-    pub timeout: i32,
-    pub session_id: i64,
-    pub passwd: Vec<u8>,
-    pub read_only: bool,
-}
-
-impl ConnectRequest {}
-
-impl Deserialize for ConnectRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        let last_zxid_seen = bytes.get_i64();
-        let timeout = bytes.get_i32();
-        let session_id = bytes.get_i64();
-        let passwd_len = bytes.get_i32();
-        let passwd = if passwd_len > 0 {
-            let mut passwd = vec![0; passwd_len as usize];
-            bytes.copy_to_slice(&mut passwd);
-            passwd
-        } else {
-            vec![]
-        };
-        let read_only = maybe_read_bool(bytes);
-        Ok(ConnectRequest {
-            protocol_version: 0,
-            last_zxid_seen,
-            timeout,
-            session_id,
-            passwd,
-            read_only,
-        })
-    }
-}
-
-impl Record for ConnectRequest {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.protocol_version);
-        buffer.put_i64(self.last_zxid_seen);
-        buffer.put_i32(self.timeout);
-        buffer.put_i64(self.session_id);
-        buffer.put_i32(self.passwd.len() as i32);
-        buffer.extend_from_slice(&self.passwd);
-        buffer.put_u8(self.read_only as u8);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + 8 + 4 + 8 + 4 + self.passwd.len() + 1
-    }
-}
-
-
-#[derive(Debug)]
-pub struct PingRequest;
-
-impl Deserialize for PingRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        Ok(PingRequest {})
-    }
-}
-
-impl Record for PingRequest {
-    fn serialize_into(&self, _buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        Ok(())
-    }
-    fn size(&self) -> usize {
-        0
-    }
-}
-
-
-#[derive(Debug)]
-pub struct GetDataRequest {
-    pub path: String,
-    pub watch: bool,
-}
-
-impl Deserialize for GetDataRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let watch = bytes.get_u8() == 1;
-        Ok(GetDataRequest { path, watch })
-    }
-}
-
-impl Record for GetDataRequest {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_u8(self.watch as u8);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 1
-    }
-}
-
-#[derive(Debug)]
-pub struct Acl {
-    pub perms: i32,
-    pub scheme: Vec<u8>,
-    pub cred: Vec<u8>,
-}
-
-#[derive(Debug)]
-pub struct CreateRequest {
-    pub path: String,
-    pub data: Vec<u8>,
-    pub acl: Vec<Acl>,
-    pub flags: i32,
-}
-
-#[derive(Debug)]
-pub struct SetDataRequest {
-    path: String,
-    data: Vec<u8>,
-    version: i32,
-}
-
-impl Deserialize for SetDataRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let data = get_data(bytes)?;
-        let version = bytes.get_i32();
-        Ok(SetDataRequest { path, data, version })
-    }
-}
-
-impl Record for SetDataRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_i32(self.data.len() as i32);
-        buffer.extend_from_slice(&self.data);
-        buffer.put_i32(self.version);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 4 + self.data.len() + 4
-    }
-}
-
-
-impl Deserialize for CreateRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let data = get_data(bytes)?;
-        let acl = get_acl(bytes)?;
-        let flags = bytes.get_i32();
-        let req = CreateRequest {
-            path,
-            data,
-            acl,
-            flags,
-        };
-        Ok(req)
-    }
-}
-
-impl Record for CreateRequest {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_i32(self.data.len() as i32);
-        buffer.extend_from_slice(&self.data);
-        buffer.put_i32(self.acl.len() as i32);
-        for acl in &self.acl {
-            buffer.put_i32(acl.perms);
-            buffer.put_i32(acl.scheme.len() as i32);
-            buffer.extend_from_slice(&acl.scheme);
-            buffer.put_i32(acl.cred.len() as i32);
-            buffer.extend_from_slice(&acl.cred);
-        }
-        buffer.put_i32(self.flags);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 4 + self.data.len() + 4 + self.acl.iter().map(|a| 4 + 4 + a.scheme.len() + 4 + a.cred.len()).sum::<usize>() + 4
-    }
-}
-
-#[derive(Debug)]
-pub struct DeleteRequest {
-    pub path: String,
-    pub version: i32,
-}
-
-impl Deserialize for DeleteRequest {
-    fn deserialize(bytes: &mut bytes::BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let version = bytes.get_i32();
-        let req = DeleteRequest {
-            path,
-            version,
-        };
-        Ok(req)
-    }
-}
-
-impl Record for DeleteRequest {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_i32(self.version);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 4
-    }
-}
-
-#[derive(Debug)]
-pub struct GetChildrenRequest {
-    pub path: String,
-    pub watch: bool,
-}
-
-impl Record for GetChildrenRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_u8(self.watch as u8);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 1
-    }
-}
-
-impl Deserialize for GetChildrenRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let watch = bytes.get_u8();
-        let req = GetChildrenRequest {
-            path,
-            watch: watch != 0,
-        };
-        Ok(req)
-    }
-}
-
-#[derive(Debug)]
-pub struct ExistsRequest {
-    pub path: String,
-    pub watch: bool,
-}
-
-impl Record for ExistsRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_u8(self.watch as u8);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 1
-    }
-}
-
-impl Deserialize for ExistsRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let watch = bytes.get_u8();
-        let req = ExistsRequest {
-            path,
-            watch: watch != 0,
-        };
-        Ok(req)
-    }
-}
-
-#[derive(Debug)]
-pub struct GetAclRequest {
-    pub path: String,
-}
-
-impl Record for GetAclRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len()
-    }
-}
-
-impl Deserialize for GetAclRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let req = GetAclRequest {
-            path,
-        };
-        Ok(req)
-    }
-}
-
-
-#[derive(Debug)]
-pub struct SetAclRequest {
-    path: String,
-    acl: Vec<Acl>,
-    version: i32,
-}
-
-impl Record for SetAclRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.path.len() as i32);
-        buffer.extend_from_slice(self.path.as_bytes());
-        buffer.put_i32(self.acl.len() as i32);
-        for acl in &self.acl {
-            buffer.put_i32(acl.perms);
-            buffer.put_i32(acl.scheme.len() as i32);
-            buffer.extend_from_slice(&acl.scheme);
-            buffer.put_i32(acl.cred.len() as i32);
-            buffer.extend_from_slice(&acl.cred);
-        }
-        buffer.put_i32(self.version);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        4 + self.path.len() + 4 + self.acl.iter().map(|a| 4 + 4 + a.scheme.len() + 4 + a.cred.len()).sum::<usize>() + 4
-    }
-}
-
-impl Deserialize for SetAclRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let path = get_str(bytes)?;
-        let acl_count = bytes.get_i32();
-        let mut acl = Vec::with_capacity(acl_count as usize);
-        for _ in 0..acl_count {
-            let perms = bytes.get_i32();
-            let scheme_len = bytes.get_i32();
-            let scheme = bytes.split_to(scheme_len as usize).to_vec();
-            let cred_len = bytes.get_i32();
-            let cred = bytes.split_to(cred_len as usize).to_vec();
-            acl.push(Acl {
-                perms,
-                scheme,
-                cred,
-            });
-        }
-        let version = bytes.get_i32();
-        let req = SetAclRequest {
-            path,
-            acl,
-            version,
-        };
-        Ok(req)
-    }
-}
-
-#[derive(Debug)]
-pub struct SetWatchesRequest {
-    relative_zxid: i64,
-    data_watches: Vec<String>,
-    exist_watches: Vec<String>,
-    child_watches: Vec<String>,
-}
-
-fn get_str_vec(bytes: &mut BytesMut) -> Result<Vec<String>, ZkError> {
-    let count = bytes.get_i32();
-    let mut vec = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let len = bytes.get_i32();
-        let s = bytes.split_to(len as usize);
-        vec.push(String::from_utf8(s.to_vec()).map_err(|e| ZkError::InvalidString)?);
-    }
-    Ok(vec)
-}
-
-impl Record for SetWatchesRequest {
-    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
-        buffer.put_i64(self.relative_zxid);
-        buffer.put_i32(self.data_watches.len() as i32);
-        for path in &self.data_watches {
-            buffer.put_i32(path.len() as i32);
-            buffer.extend_from_slice(path.as_bytes());
-        }
-        buffer.put_i32(self.exist_watches.len() as i32);
-        for path in &self.exist_watches {
-            buffer.put_i32(path.len() as i32);
-            buffer.extend_from_slice(path.as_bytes());
-        }
-        buffer.put_i32(self.child_watches.len() as i32);
-        for path in &self.child_watches {
-            buffer.put_i32(path.len() as i32);
-            buffer.extend_from_slice(path.as_bytes());
-        }
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        8 + 4 + self.data_watches.iter().map(|p| 4 + p.len()).sum::<usize>() + 4
-            + self.exist_watches.iter().map(|p| 4 + p.len()).sum::<usize>()
-            + 4 + self.child_watches.iter().map(|p| 4 + p.len()).sum::<usize>()
-    }
-}
-
-impl Deserialize for SetWatchesRequest {
-    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
-        let relative_zxid = bytes.get_i64();
-        let data_watches = get_str_vec(bytes)?;
-        let exist_watches = get_str_vec(bytes)?;
-        let child_watches = get_str_vec(bytes)?;
-        let req = SetWatchesRequest {
-            relative_zxid,
-            data_watches,
-            exist_watches,
-            child_watches,
-        };
-        Ok(req)
-    }
-}
+use crate::length_codec::LengthDelimitedCodec;
+use crate::proto::*;
+use crate::record::{Deserialize, Serialize};
+use crate::zk_errcode::ZooErrors;
 
 #[derive(Debug)]
 pub enum Request {
     Connect(ConnectRequest),
+    Auth(AuthPacket),
     Create(CreateRequest),
+    CreateTTL(CreateTTLRequest),
     Delete(DeleteRequest),
     Exists(ExistsRequest),
     GetData(GetDataRequest),
     SetData(SetDataRequest),
-    GetAcl(GetAclRequest),
-    SetAcl(SetAclRequest),
+    GetAcl(GetACLRequest),
+    SetAcl(SetACLRequest),
     GetChildren(GetChildrenRequest),
-    GetChildren2(GetChildrenRequest),
-    Ping(PingRequest),
+    GetChildren2(GetChildren2Request),
+    Ping,
+    Whoami,
     GetChildren3(GetChildrenRequest),
+    Multi(MultiRequest),
     // Check(CheckRequest),
 // Multi(MultiRequest),
-    Close(PingRequest),
-    SetWatches(SetWatchesRequest),
+    Close,
+    SetWatches(SetWatches),
+    CheckWatches(CheckWatchesRequest),
+    Sync(SyncRequest),
 }
 
-impl Record for Request {
+#[derive(Debug)]
+pub struct MultiRequest {
+    ops: Vec<(MultiHeader, Request)>,
+    done_header: MultiHeader,
+}
+
+impl Serialize for MultiRequest {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        for (header, req) in &self.ops {
+            header.serialize_into(buffer)?;
+            req.serialize_into(buffer)?;
+        }
+        self.done_header.serialize_into(buffer)?;
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        let mut size = 0;
+        for (header, req) in &self.ops {
+            size += header.size();
+            size += req.size();
+        }
+        size += self.done_header.size();
+        size
+    }
+}
+
+impl Deserialize for MultiRequest {
+    fn deserialize(buffer: &mut BytesMut) -> Result<Self, ZkError> {
+        let mut ops = Vec::new();
+        let done_header: MultiHeader;
+        loop {
+            let header = MultiHeader::deserialize(buffer)?;
+            if header.done == 1 {
+                done_header = header;
+                break;
+            }
+            let opcode = OpCodes::from_i32(header.r#type).ok_or(ZkError::InvalidOpCode(header.r#type))?;
+
+            let req = Request::deserialize(buffer, opcode)?;
+            ops.push((header, req));
+        }
+        Ok(MultiRequest {
+            ops,
+            done_header,
+        })
+    }
+}
+
+impl Request {
+    fn deserialize(bytes: &mut BytesMut, op_type: OpCodes) -> Result<Self, ZkError> {
+        match op_type {
+            OpCodes::Create => {
+                return Ok(Request::Create(CreateRequest::deserialize(bytes)?));
+            }
+            OpCodes::Create2 => {
+                return Ok(Request::Create(CreateRequest::deserialize(bytes)?));
+            }
+            OpCodes::CreateTtl => {
+                return Ok(Request::CreateTTL(CreateTTLRequest::deserialize(bytes)?));
+            }
+            OpCodes::CreateContainer => {
+                return Ok(Request::Create(CreateRequest::deserialize(bytes)?));
+            }
+            OpCodes::Delete => {
+                return Ok(Request::Delete(DeleteRequest::deserialize(bytes)?));
+            }
+            OpCodes::SetData => {
+                return Ok(Request::SetData(SetDataRequest::deserialize(bytes)?));
+            }
+            OpCodes::Check => {
+                return Ok(Request::CheckWatches(CheckWatchesRequest::deserialize(bytes)?));
+            }
+            OpCodes::GetChildren => {
+                return Ok(Request::GetChildren(GetChildrenRequest::deserialize(bytes)?));
+            }
+            OpCodes::Exists => {
+                return Ok(Request::Exists(ExistsRequest::deserialize(bytes)?));
+            }
+            OpCodes::GetData => {
+                return Ok(Request::GetData(GetDataRequest::deserialize(bytes)?));
+            }
+
+            _ => {
+                unreachable!("unimplemented opcode: {:?}", op_type)
+            }
+        }
+    }
+}
+
+impl Serialize for Request {
     fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
         match self {
             Request::Create(req) => { req.serialize_into(buffer) }
@@ -466,11 +143,29 @@ impl Record for Request {
             Request::SetAcl(req) => { req.serialize_into(buffer) }
             Request::GetChildren(req) => { req.serialize_into(buffer) }
             Request::GetChildren2(req) => { req.serialize_into(buffer) }
-            Request::Ping(req) => { req.serialize_into(buffer) }
+            Request::Ping => { Ok(()) }
             Request::GetChildren3(req) => { req.serialize_into(buffer) }
-            Request::Close(req) => { req.serialize_into(buffer) }
+            Request::Close => { Ok(()) }
             Request::SetWatches(req) => { req.serialize_into(buffer) }
             Request::Connect(req) => { req.serialize_into(buffer) }
+            Request::Auth(req) => {
+                req.serialize_into(buffer)
+            }
+            Request::CreateTTL(req) => {
+                req.serialize_into(buffer)
+            }
+            Request::CheckWatches(req) => {
+                req.serialize_into(buffer)
+            }
+            Request::Whoami => {
+                Ok(())
+            }
+            Request::Multi(req) => {
+                req.serialize_into(buffer)
+            }
+            Request::Sync(req) => {
+                req.serialize_into(buffer)
+            }
         }
     }
 
@@ -485,23 +180,111 @@ impl Record for Request {
             Request::SetAcl(req) => { req.size() }
             Request::GetChildren(req) => { req.size() }
             Request::GetChildren2(req) => { req.size() }
-            Request::Ping(req) => { req.size() }
+            Request::Ping => { 0 }
             Request::GetChildren3(req) => { req.size() }
-            Request::Close(req) => { req.size() }
+            Request::Close => { 0 }
             Request::SetWatches(req) => { req.size() }
             Request::Connect(req) => { req.size() }
+            Request::Auth(req) => { req.size() }
+            Request::CreateTTL(req) => {
+                req.size()
+            }
+            Request::CheckWatches(req) => {
+                req.size()
+            }
+            Request::Whoami => {
+                0
+            }
+            Request::Multi(req) => {
+                req.size()
+            }
+            Request::Sync(req) => {
+                req.size()
+            }
         }
     }
 }
 
 #[derive(Debug)]
+pub struct MultiResponse {
+    results: Vec<Result<(ZkResponse, MultiHeader), ZooErrors>>,
+    done_header: MultiHeader,
+}
+
+impl Serialize for MultiResponse {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        for result in &self.results {
+            match result {
+                Ok((response, header)) => {
+                    header.serialize_into(buffer)?;
+                    // response.serialize_into(buffer)?;
+                }
+                Err(err) => {
+                    let header = MultiHeader {
+                        r#type: -1,
+                        done: 0,
+                        err: err.to_i32().unwrap(),
+                    };
+                    header.serialize_into(buffer)?;
+                }
+            }
+        }
+        self.done_header.serialize_into(buffer)?;
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        let mut size = 0;
+        for result in &self.results {
+            match result {
+                Ok((response, header)) => {
+                    size += header.size() + response.size();
+                }
+                Err(_) => {
+                    size += 4 + 1 + 4;
+                }
+            }
+        }
+        size + self.done_header.size()
+    }
+}
+
+impl Deserialize for MultiResponse {
+    fn deserialize(bytes: &mut BytesMut) -> Result<Self, ZkError> {
+        let mut results = vec![];
+        let done_header: MultiHeader;
+        loop {
+            let header = MultiHeader::deserialize(bytes)?;
+            if header.done == 1 {
+                done_header = header;
+                break;
+            }
+            let opcode = header.r#type;
+            let err = header.err;
+            if opcode == -1 {
+                results.push(Ok((ZkResponse::Err(err), header)));
+                continue;
+            }
+            let opcode_enum = OpCodes::from_i32(opcode);
+
+            let response = ZkResponse::deserialize(bytes, opcode_enum)?;
+            results.push(Ok((response, header)));
+        }
+        return Ok(MultiResponse {
+            results,
+            done_header,
+        });
+    }
+}
+
+
+#[derive(Debug)]
 pub struct RequestPacket {
     pub request_header: Option<RequestHeader>,
-    // pub request: Box<dyn Record>,
     pub request: Request,
 }
 
-impl Record for RequestPacket {
+impl Serialize for RequestPacket {
     fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
         if let Some(header) = &self.request_header {
             header.serialize_into(buffer)?;
@@ -516,20 +299,22 @@ impl Record for RequestPacket {
 }
 
 #[derive(Debug)]
-pub struct RequestHeader {
-    pub xid: i32,
-    pub opcode: i32,
+pub struct ResponsePacket {
+    pub response_header: Option<ReplyHeader>,
+    pub response: ZkResponse,
 }
 
-impl Record for RequestHeader {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.xid);
-        buffer.put_i32(self.opcode);
+impl Serialize for ResponsePacket {
+    fn serialize_into(&self, buffer: &mut BytesMut) -> Result<(), ZkError> {
+        if let Some(header) = &self.response_header {
+            header.serialize_into(buffer)?;
+        }
+        self.response.serialize_into(buffer)?;
         Ok(())
     }
 
     fn size(&self) -> usize {
-        8
+        self.response_header.as_ref().map_or(0, |h| h.size()) + self.response.size()
     }
 }
 
@@ -537,39 +322,186 @@ impl Record for RequestHeader {
 pub enum ZkResponse {
     Connect(ConnectResponse),
     GetData(GetDataResponse),
-    Ping(ReplyHeader),
+    SetData(SetDataResponse),
+    Create(CreateResponse),
+    Create2(Create2Response),
+    WatchEvent(WatcherEvent),
+    WhoAmI(WhoAmIResponse),
+    GetChildren2 {
+        children: Vec<String>,
+        stat: Stat,
+    },
+    GetAcl {
+        acl: Vec<ACL>,
+        stat: Stat,
+    },
+    Ping,
+    Stat(Stat),
+    Empty,
+    Strings(Vec<String>),
+    String(String),
+    Multi(MultiResponse),
+    Err(i32),
+}
+
+impl ZkResponse {
+    fn deserialize(src: &mut BytesMut, opcode: Option<OpCodes>) -> Result<Self, ZkError> {
+        let opcode = opcode.ok_or(ZkError::InvalidOpCode(-1))?;
+
+        match opcode {
+            OpCodes::Connect => {
+                unreachable!("should not be here");
+            }
+
+            OpCodes::Exists | OpCodes::SetData | OpCodes::SetAcl => {
+                let stat = Stat::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Stat(stat));
+            }
+            OpCodes::GetData => {
+                let data = Vec::<u8>::deserialize(src)?;
+                let stat = Stat::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::GetData(GetDataResponse { data, stat }));
+            }
+
+            OpCodes::Delete | OpCodes::Close => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::GetChildren => {
+                let children = Vec::<String>::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Strings(children));
+            }
+            OpCodes::GetChildren2 => {
+                let children = Vec::<String>::deserialize(src)?;
+                let stat = Stat::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::GetChildren2 { children, stat });
+            }
+            OpCodes::Create => {
+                let resp = CreateResponse::deserialize(src)?;
+
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Create(resp));
+            }
+            OpCodes::CreateTtl => {
+                let path = String::deserialize(src)?;
+
+                assert!(src.is_empty());
+                return Ok(ZkResponse::String(path));
+            }
+            OpCodes::GetAcl => {
+                let acl = Vec::<ACL>::deserialize(src)?;
+                let stat = Stat::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::GetAcl { acl, stat });
+            }
+            OpCodes::Check => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::CreateContainer => {
+                let path = String::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::String(path));
+            }
+            OpCodes::SetAuth => {
+                info!(">>>>>>>>>>>>>>>>>.set auth");
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::SetWatches => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::Create2 => {
+                let res = Create2Response::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Create2(res));
+            }
+            OpCodes::CheckWatches => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            OpCodes::WhoAmI => {
+                let res = WhoAmIResponse::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::WhoAmI(res));
+            }
+            OpCodes::Multi => {
+                let res = MultiResponse::deserialize(src)?;
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Multi(res));
+            }
+            OpCodes::Error => {
+                assert!(src.is_empty());
+                return Ok(ZkResponse::Empty);
+            }
+            _ => {
+                info!("unhandled opcode: {:?}", opcode);
+                todo!("{:?}", opcode);
+            }
+        }
+    }
 }
 
 
-impl Record for ZkResponse {
+impl Serialize for ZkResponse {
     fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
         match self {
             ZkResponse::Connect(resp) => {
-                buffer.put_i32(resp.protocol_version);
-                buffer.put_i32(resp.timeout);
-                buffer.put_i64(resp.session_id);
-                buffer.put_i32(resp.passwd.len() as i32);
-                buffer.extend_from_slice(&resp.passwd);
-                buffer.put_i8(resp.read_only as i8);
+                resp.serialize_into(buffer)?;
             }
             ZkResponse::GetData(r) => {
-                r.reply_header.serialize_into(buffer)?;
-                buffer.put_i32(r.data.len() as i32);
-                buffer.extend_from_slice(&r.data);
-                buffer.put_i64(r.czxid);
-                buffer.put_i64(r.mzxid);
-                buffer.put_i64(r.ctime);
-                buffer.put_i64(r.mtime);
-                buffer.put_i32(r.version);
-                buffer.put_i32(r.cversion);
-                buffer.put_i32(r.aversion);
-                buffer.put_i64(r.ephemeral_owner);
-                buffer.put_i32(r.data_length);
-                buffer.put_i32(r.num_children);
-                buffer.put_i64(r.pzxid);
+                r.serialize_into(buffer)?;
             }
-            ZkResponse::Ping(resp) => {
-                resp.serialize_into(buffer)?;
+            ZkResponse::Ping => {}
+            ZkResponse::GetAcl { acl, stat } => {
+                buffer.put_i32(acl.len() as i32);
+                for a in acl {
+                    a.serialize_into(buffer)?;
+                }
+                stat.serialize_into(buffer)?;
+            }
+            ZkResponse::Stat(stat) => {
+                stat.serialize_into(buffer)?;
+            }
+            ZkResponse::Empty => {}
+            ZkResponse::Strings(strs) => {
+                buffer.put_i32(strs.len() as i32);
+                for s in strs {
+                    buffer.put_i32(s.len() as i32);
+                    buffer.put_slice(s.as_bytes());
+                }
+            }
+            ZkResponse::String(str) => {
+                buffer.put_i32(str.len() as i32);
+                buffer.put_slice(str.as_bytes());
+            }
+            ZkResponse::Multi(_) => { todo!() }
+            ZkResponse::GetChildren2 { children, stat } => {
+                children.serialize_into(buffer)?;
+                stat.serialize_into(buffer)?;
+            }
+            ZkResponse::WatchEvent(req) => {
+                req.serialize_into(buffer)?;
+            }
+            ZkResponse::Create2(req) => {
+                req.serialize_into(buffer)?;
+            }
+            ZkResponse::WhoAmI(res) => {
+                res.serialize_into(buffer)?;
+            }
+            ZkResponse::SetData(res) => {
+                res.serialize_into(buffer)?;
+            }
+            ZkResponse::Create(res) => {
+                res.serialize_into(buffer)?;
+            }
+            ZkResponse::Err(err) => {
+                buffer.put_i32(*err);
             }
         }
         Ok(())
@@ -581,91 +513,47 @@ impl Record for ZkResponse {
                 4 + 4 + 8 + 4 + r.passwd.len() + 1
             }
             ZkResponse::GetData(r) => {
-                r.reply_header.size() + 4 + r.data.len() + 6 * 8 + 4 * 5
+                4 + r.data.len() + 6 * 8 + 4 * 5
             }
-            ZkResponse::Ping(r) => {
-                r.size()
+            ZkResponse::Ping => {
+                0
+            }
+            ZkResponse::GetAcl { acl, stat } => {
+                4 + acl.len() * 8 + stat.size()
+            }
+            ZkResponse::Stat(stat) => {
+                stat.size()
+            }
+            ZkResponse::Empty => { 0 }
+            ZkResponse::Strings(strs) => {
+                4 + strs.iter().map(|s| 4 + s.len()).sum::<usize>()
+            }
+            ZkResponse::String(str) => {
+                4 + str.len()
+            }
+            ZkResponse::Multi(_) => { todo!() }
+            ZkResponse::GetChildren2 { children, stat } => {
+                children.size() + stat.size()
+            }
+            ZkResponse::WatchEvent(req) => {
+                req.size()
+            }
+            ZkResponse::Create2(req) => {
+                req.size()
+            }
+            ZkResponse::WhoAmI(req) => {
+                req.size()
+            }
+            ZkResponse::SetData(req) => {
+                req.size()
+            }
+            ZkResponse::Create(req) => {
+                req.size()
+            }
+            ZkResponse::Err(_) => {
+                4
             }
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct ReplyHeader {
-    pub xid: i32,
-    pub zxid: i64,
-    pub err: i32,
-}
-
-impl Record for ReplyHeader {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        buffer.put_i32(self.xid);
-        buffer.put_i64(self.zxid);
-        buffer.put_i32(self.err);
-        Ok(())
-    }
-
-    fn size(&self) -> usize {
-        16
-    }
-}
-
-#[derive(Debug)]
-pub struct ConnectResponse {
-    pub protocol_version: i32,
-    pub timeout: i32,
-    pub session_id: i64,
-    pub passwd: Vec<u8>,
-    pub read_only: bool,
-}
-
-#[derive(Debug)]
-pub struct GetDataResponse {
-    pub reply_header: ReplyHeader,
-    pub data: Vec<u8>,
-
-    pub czxid: i64,
-    /// The last transaction that modified the znode.
-    pub mzxid: i64,
-    /// Milliseconds since epoch when the znode was created.
-    pub ctime: i64,
-    /// Milliseconds since epoch when the znode was last modified.
-    pub mtime: i64,
-    /// The number of changes to the data of the znode.
-    pub version: i32,
-    /// The number of changes to the children of the znode.
-    pub cversion: i32,
-    /// The number of changes to the ACL of the znode.
-    pub aversion: i32,
-    /// The session ID of the owner of this znode, if it is an ephemeral entry.
-    pub ephemeral_owner: i64,
-    /// The length of the data field of the znode.
-    pub data_length: i32,
-    /// The number of children this znode has.
-    pub num_children: i32,
-    /// The transaction ID that last modified the children of the znode.
-    pub pzxid: i64,
-
-}
-
-impl GetDataResponse {
-    fn serialize_into(&self, buffer: &mut bytes::BytesMut) -> Result<(), ZkError> {
-        self.reply_header.serialize_into(buffer)?;
-        buffer.put_i32(self.data.len() as i32);
-        buffer.extend_from_slice(&self.data);
-
-        buffer.put_i64(self.czxid);
-        buffer.put_i64(self.mzxid);
-        buffer.put_i64(self.ctime);
-        buffer.put_i64(self.mtime);
-        buffer.put_i32(self.version);
-        buffer.put_i32(self.cversion);
-        buffer.put_i32(self.aversion);
-        buffer.put_i64(self.ephemeral_owner);
-        buffer.put_i32(self.data_length);
-        buffer.put_i32(self.num_children);
-        buffer.put_i64(self.pzxid);
-        Ok(())
     }
 }
 
@@ -689,11 +577,14 @@ lazy_static! {
         .new_codec();
 }
 
-pub struct ClientPacketCodec {}
+pub struct ClientPacketCodec {
+    inner: LengthDelimitedCodec,
+    requests_by_xid: Arc<DashMap<i32, OpCodes>>,
+}
 
 impl ClientPacketCodec {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(map: Arc<DashMap<i32, OpCodes>>) -> Self {
+        Self { inner: LENGTH_DELIMITED_CODEC.clone(), requests_by_xid: map }
     }
 }
 
@@ -701,6 +592,16 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
     type Error = ZkError;
 
     fn encode(&mut self, item: RequestPacket, dst: &mut bytes::BytesMut) -> Result<(), Self::Error> {
+        info!("ClientPacketCodec encode: {:?}", item);
+        if let Some(header) = &item.request_header {
+            let xid = header.xid;
+            let op = header.r#type;
+            if let Some(opcode) = OpCodes::from_i32(op) {
+                self.requests_by_xid.insert(xid, opcode);
+                debug!("encode insert xid map {:?}:{:?}", xid, op);
+            }
+        }
+
         let n = item.size();
         dst.reserve(n + 4);
         dst.put_i32(n as i32);
@@ -708,6 +609,116 @@ impl Encoder<RequestPacket> for ClientPacketCodec {
         Ok(())
     }
 }
+
+// b->p message decode
+impl Decoder for ClientPacketCodec {
+    type Item = ResponsePacket;
+    type Error = ZkError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        let src = self.inner.decode(src).map_err(|_| ZkError::DecodeError)?;
+
+        info!("ClientPacketCodec decode ResponsePacket: {:?}", src);
+        match src {
+            None => { return Ok(None); }
+            Some((mut src, n)) => {
+                ensure_min_length_bytes(&src, 4)?;
+                let xid = i32::from_be_bytes(src[..4].try_into().unwrap());
+                let xid_enum = XidCodes::from_i32(xid);
+
+                if let Some(XidCodes::ConnectXid) = xid_enum {
+                    let resp = ConnectResponse::deserialize(&mut src)?;
+                    return Ok(Some(ResponsePacket {
+                        response_header: None,
+                        response: ZkResponse::Connect(resp),
+                    }));
+                }
+
+                let xid = src.get_i32();
+                let zxid = src.get_i64();
+                let err = src.get_i32();
+                let reply_header = ReplyHeader {
+                    xid,
+                    zxid,
+                    err,
+                };
+
+                info!("xid: {}, zxid: {}, err: {}", xid, zxid, err);
+                match xid_enum {
+                    Some(XidCodes::WatchXid) => {
+                        debug!("watch event{}", src.len());
+                        let resp = WatcherEvent::deserialize(&mut src)?;
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::WatchEvent(resp),
+                        }));
+                    }
+                    Some(XidCodes::PingXid) => {
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::Empty,
+                        }));
+                    }
+                    Some(XidCodes::AuthXid) => {
+                        assert!(src.is_empty());
+                        info!("auth response");
+                        return Ok(Some(ResponsePacket {
+                            response_header: Some(reply_header),
+                            response: ZkResponse::Empty,
+                        }));
+                    }
+
+                    Some(_) => {
+                        panic!("xid: {}", xid)
+                    }
+                    _ => {}
+                }
+
+                info!("reply_header: {:?}", reply_header);
+
+                if err != 0 {
+                    return Ok(Some(ResponsePacket {
+                        response_header: Some(reply_header),
+                        response: ZkResponse::Empty,
+                    }));
+                }
+                if xid_enum.is_some() {
+                    match xid_enum.unwrap() {
+                        XidCodes::ConnectXid => { unreachable!() }
+                        XidCodes::WatchXid => {
+                            return Ok(Some(ResponsePacket {
+                                response_header: Some(reply_header),
+                                response: ZkResponse::Empty,
+                            }));
+                        }
+                        XidCodes::PingXid => {
+                            return Ok(Some(ResponsePacket {
+                                response_header: Some(reply_header),
+                                response: ZkResponse::Ping,
+                            }));
+                        }
+                        XidCodes::AuthXid => {
+                            todo!()
+                        }
+                        XidCodes::SetWatchesXid => {
+                            todo!()
+                        }
+                    }
+                }
+                let opcode = self.requests_by_xid.get(&xid).ok_or(ZkError::DecodeError)?;
+                let opcode = opcode.clone();
+
+                debug!("ClientPacketCodec decoder, opcode: {:?}, remaining len: {}", opcode, src.len());
+                let resp = ZkResponse::deserialize(&mut src, Some(opcode))?;
+                return Ok(Some(ResponsePacket {
+                    response_header: Some(reply_header),
+                    response: resp,
+                }));
+            }
+        }
+    }
+}
+
 
 pub struct ServerPacketCodec {
     inner: LengthDelimitedCodec,
@@ -720,56 +731,108 @@ impl ServerPacketCodec {
         }
     }
 
-    fn decode_inner(src: &mut bytes::BytesMut) -> Result<Option<RequestPacket>, ZkError> {
-        let xid = src.get_i32();
-        let xid_enum = XidCodes::from_i32(xid);
+    fn decode_inner(&self, src: &mut bytes::BytesMut, len: usize) -> Result<Option<RequestPacket>, ZkError> {
+        let len = src.len() as i32;
+        debug!("zookeeper_proxy: decoding inner, len: {}", len);
+        ensure_min_length_bytes(src, XID_LENGTH + OPCODE_LENGTH)?; // xid + opcode
 
-        println!("xid:{} xid: {:?}", xid, xid_enum);
+        // Control requests, with XIDs <= 0.
+        // These are meant to control the state of a session:
+        // connect, keep-alive, authenticate and set initial watches.
+        //
+        // Note: setWatches is a command historically used to set watches
+        //       right after connecting, typically used when roaming from one
+        //       ZooKeeper server to the next. Thus, the special xid.
+        //       However, some client implementations might expose setWatches
+        //       as a regular data request, so we support that as well.
+
+        let xid = i32::from_be_bytes(src[..4].try_into().unwrap());
+
+        let xid_enum = XidCodes::from_i32(xid);
+        debug!("xid_enum = {:?}", xid_enum);
         if let Some(xid_enum) = xid_enum {
             match xid_enum {
                 XidCodes::ConnectXid => {
                     let req = ConnectRequest::deserialize(src)?;
-                    println!("connect req: {:?}", req);
+                    debug!("connect request: {:?}", req);
                     return Ok(Some(RequestPacket {
                         request_header: None,
-                        // request: Box::new(req),
                         request: Request::Connect(req),
                     }));
                 }
-                XidCodes::WatchXid => {}
                 XidCodes::PingXid => {
-                    let opcode = src.get_i32();
+                    _ = src.get_i32(); // skip xid
+                    let r#type = src.get_i32();
+                    assert!(src.is_empty());
                     return Ok(Some(RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
-                        // request: Box::new(PingRequest {}),
-                        request: Request::Ping(PingRequest {}),
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Ping,
                     }));
                 }
-                XidCodes::AuthXid => {}
-                XidCodes::SetWatchesXid => {}
+                XidCodes::AuthXid => {
+                    _ = src.get_i32(); // skip xid
+                    let r#type = src.get_i32();
+                    let req = AuthPacket::deserialize(src)?;
+                    info!("auth request: {:?}", req);
+                    assert!(src.is_empty());
+                    return Ok(Some(RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Auth(req),
+                    }));
+                }
+                XidCodes::SetWatchesXid => {
+                    _ = src.get_i32(); // skip xid
+                    let r#type = src.get_i32();
+                    let req = SetWatches::deserialize(src)?;
+                    assert!(src.is_empty());
+                    return Ok(Some(RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::SetWatches(req),
+                    }));
+                }
+                XidCodes::WatchXid => {
+                    //  WATCH_XID is generated by the server, so that and everything else can be ignored here.
+                }
             }
         }
-        // Data requests, with XIDs > 0.
+        let xid = src.get_i32();
 
-        let opcode = src.get_i32();
-        let opcode_enum = OpCodes::from_i32(opcode).unwrap();
-        println!("opcode_enum: {:?}", opcode_enum);
+        // Data requests, with XIDs > 0.
+        let r#type = src.get_i32();  // opcode
+        println!("opcode: {}", r#type);
+
+        let opcode_enum = OpCodes::from_i32(r#type);
+        if opcode_enum.is_none() {
+            error!("invalid opcode: {}", r#type);
+            return Err(ZkError::InvalidOpCode(r#type));
+        }
+        let opcode_enum = opcode_enum.unwrap();
+
+        info!("opcode_enum: {:?}", opcode_enum);
         match opcode_enum {
             OpCodes::GetData => {
                 let req = GetDataRequest::deserialize(src)?;
+                info!("get data request: {:?}", req);
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         // request: Box::new(req),
                         request: Request::GetData(req),
                     }));
             }
-            OpCodes::Create | OpCodes::Create2 | OpCodes::CreateTtl | OpCodes::CreateContainer => {
+            OpCodes::CreateTtl => {
+                let req = CreateTTLRequest::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::CreateTTL(req),
+                    }));
+            }
+            OpCodes::Create | OpCodes::Create2 | OpCodes::CreateContainer => {
                 let req = CreateRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
-                        // request: Box::new(req),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::Create(req),
                     }));
             }
@@ -777,23 +840,32 @@ impl ServerPacketCodec {
                 let req = SetDataRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::SetData(req),
                     }));
             }
-            OpCodes::GetChildren | OpCodes::GetChildren2 => {
+            OpCodes::GetChildren => {
                 let req = GetChildrenRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::GetChildren(req),
+                    }));
+            }
+            OpCodes::GetChildren2 => {
+                let req = GetChildren2Request::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::GetChildren2(req),
                     }));
             }
             OpCodes::Delete => {
                 let req = DeleteRequest::deserialize(src)?;
+                info!("delete request: {:?}", req);
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::Delete(req),
                     }));
             }
@@ -801,53 +873,90 @@ impl ServerPacketCodec {
                 let req = ExistsRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::Exists(req),
                     }));
             }
             OpCodes::GetAcl => {
-                let req = GetAclRequest::deserialize(src)?;
+                let req = GetACLRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::GetAcl(req),
                     }));
             }
             OpCodes::SetAcl => {
-                let req = SetAclRequest::deserialize(src)?;
+                let req = SetACLRequest::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::SetAcl(req),
                     }));
             }
-            OpCodes::Sync => {}
-            OpCodes::Check => {}
-            OpCodes::Multi => {}
-            OpCodes::Reconfig => {}
-            OpCodes::CheckWatches => {}
-            OpCodes::RemoveWatches => {}
             OpCodes::Close => {
                 return Ok(Some(RequestPacket {
-                    request_header: Some(RequestHeader { xid, opcode }),
-                    request: Request::Close(PingRequest {}),
+                    request_header: Some(RequestHeader { xid, r#type }),
+                    request: Request::Close,
                 }));
             }
-            OpCodes::SetAuth => {}
-            OpCodes::SetWatches => {
-                let req = SetWatchesRequest::deserialize(src)?;
+            OpCodes::SetAuth => {
+                let req = AuthPacket::deserialize(src)?;
                 return Ok(Some(
                     RequestPacket {
-                        request_header: Some(RequestHeader { xid, opcode }),
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Auth(req),
+                    }));
+            }
+            OpCodes::SetWatches => {
+                let req = SetWatches::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
                         request: Request::SetWatches(req),
                     }));
             }
-            OpCodes::GetEphemerals => {}
-            OpCodes::GetAllChildrenNumber => {}
-            OpCodes::SetWatches2 => {}
-            _ => {}
+            OpCodes::CheckWatches => {
+                let req = CheckWatchesRequest::deserialize(src)?;
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::CheckWatches(req),
+                    }));
+            }
+            OpCodes::WhoAmI => {
+                assert!(src.is_empty());
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Whoami,
+                    }));
+            }
+            OpCodes::Multi => {
+                let req = MultiRequest::deserialize(src)?;
+                info!("multi request: {:?}", req);
+                assert!(src.is_empty());
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Multi(req),
+                    }));
+            }
+            OpCodes::Sync => {
+                let req = SyncRequest::deserialize(src)?;
+                info!("sync request: {:?}", req);
+                assert!(src.is_empty());
+                return Ok(Some(
+                    RequestPacket {
+                        request_header: Some(RequestHeader { xid, r#type }),
+                        request: Request::Sync(req),
+                    }));
+            }
+
+            _ => {
+                panic!("{:?}", opcode_enum)
+            }
         }
-        unreachable!()
+        panic!("unreachable")
     }
 }
 
@@ -865,8 +974,8 @@ impl Decoder for ServerPacketCodec {
                     None => {
                         Ok(None)
                     }
-                    Some(mut src) => {
-                        Self::decode_inner(&mut src)
+                    Some((mut src, n)) => {
+                        self.decode_inner(&mut src, n)
                     }
                 }
             }
@@ -874,21 +983,33 @@ impl Decoder for ServerPacketCodec {
     }
 }
 
-impl Encoder<ZkResponse> for ServerPacketCodec {
+impl Encoder<ResponsePacket> for ServerPacketCodec {
     type Error = ZkError;
 
-    fn encode(&mut self, item: ZkResponse, dst: &mut BytesMut) -> Result<(), Self::Error> {
+    fn encode(&mut self, item: ResponsePacket, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let mut buf = BytesMut::new();
         buf.reserve(item.size());
         item.serialize_into(&mut buf)?;
-        self.inner.encode(buf.freeze(), dst).map_err(|e| ZkError::EncodeError)
+        self.inner.encode(buf.freeze(), dst).map_err(|_| ZkError::EncodeError)
     }
 }
 
 fn ensure_min_length(len: i32, min: i32) -> Result<(), ZkError> {
     if len < min {
-        return Err(ZkError::InvalidPacketLength(len));
+        // return Err(ZkError::InvalidPacketLength(len));
+        panic!("ensure_min_length: len: {}, require min: {}", len, min);
     }
+    Ok(())
+}
+
+fn ensure_min_length_bytes(bytes: &bytes::BytesMut, min: i32) -> Result<(), ZkError> {
+    return ensure_min_length(bytes.len() as i32, min);
+}
+
+fn ensure_max_length_bytes(bytes: &bytes::BytesMut) -> Result<(), ZkError> {
+    // if len > MAX_PACKET_LENGTH {
+    //     return Err(ZkError::InvalidPacketLength(len));
+    // }
     Ok(())
 }
 
@@ -899,58 +1020,6 @@ fn ensure_max_len(len: usize) -> Result<(), ZkError> {
     Ok(())
 }
 
-fn get_acl(bytes: &mut bytes::BytesMut) -> Result<Vec<Acl>, ZkError> {
-    let len = bytes.get_i32();
-    if len <= 0 {
-        return Ok(vec![]);
-    }
-    if bytes.len() < len as usize {
-        return Err(ZkError::InvalidPacketLength(len));
-    }
-    ensure_max_len(len as usize)?;
-    let mut vec = vec![];
-    for _ in 0..len {
-        let perms = bytes.get_i32();
-        let scheme = get_data(bytes)?;
-        let cred = get_data(bytes)?;
-        vec.push(Acl {
-            perms,
-            scheme,
-            cred,
-        });
-    }
-    Ok(vec)
-}
-
-fn get_data(bytes: &mut bytes::BytesMut) -> Result<Vec<u8>, ZkError> {
-    let len = bytes.get_i32();
-    println!("get data: len: {}", len);
-    if len <= 0 {
-        return Ok(vec![]);
-    }
-    if bytes.len() < len as usize {
-        return Err(ZkError::InvalidPacketLength(len));
-    }
-    ensure_max_len(len as usize)?;
-    let mut vec = vec![0; len as usize];
-    bytes.copy_to_slice(&mut vec);
-    Ok(vec)
-}
-
-fn get_str(bytes: &mut bytes::BytesMut) -> Result<String, ZkError> {
-    let len = bytes.get_i32();
-    if len <= 0 {
-        return Ok("".to_string());
-    }
-    if bytes.len() < len as usize {
-        return Err(ZkError::InvalidPacketLength(len));
-    }
-    ensure_max_len(len as usize)?;
-    let mut vec = vec![0; len as usize];
-    bytes.copy_to_slice(&mut vec);
-    let str = String::from_utf8(vec).map_err(|e| ZkError::InvalidString)?;
-    Ok(str)
-}
 
 fn maybe_read_bool(bytes: &mut bytes::BytesMut) -> bool {
     return if bytes.remaining() >= 1 {
